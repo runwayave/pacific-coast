@@ -30,7 +30,7 @@ import (
 // since N?" and no-op when nothing has changed.
 
 const (
-	tideCacheDir    = ".tide-cache"
+	tideCacheDir  = ".tide-cache"
 	pcSchemaDir   = "schema"
 	pcVersionFile = "version.json"
 )
@@ -189,7 +189,7 @@ func callGetMergedSchema(ctx context.Context, cfg *tideConfig, sinceVersion stri
 	if err != nil {
 		return nil, err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var resp getMergedSchemaResponse
 	err = client.invoke(ctx, "/atlantis.admin.v1.Admin/GetMergedSchema",
@@ -260,4 +260,3 @@ func pullBeforeApply(ctx context.Context, cfg *tideConfig) {
 		fmt.Fprintln(os.Stderr, "tide: pre-apply cache write failed (continuing):", err)
 	}
 }
-

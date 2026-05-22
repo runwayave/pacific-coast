@@ -7,37 +7,6 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// schemaFixture is a tiny merged IR (parsed + lowered) used as the
-// reference schema for the validator tests. Two entities so we can
-// exercise cross-entity touches() declarations.
-func schemaFixture(t *testing.T) *dsl.IR {
-	t.Helper()
-	src := `
-entity Account in consumer {
-  id          bigint primary
-  consumer_id text not null
-  email       text not null
-  deleted_at  timestamptz
-}
-
-entity SavedOutfit in consumer {
-  id          bigint primary
-  consumer_id bigint not null references consumer.Account.id
-  name        text not null
-  deleted_at  timestamptz
-}
-`
-	f, err := dsl.Parse("t.pc", []byte(src))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	ir, err := dsl.Lower([]*dsl.File{f})
-	if err != nil {
-		t.Fatalf("lower: %v", err)
-	}
-	return ir
-}
-
 // lowerWithCustom parses a fixture containing a query or procedure and
 // returns the lowered CustomQuery/CustomProcedure for the validator
 // tests. We use the IR-lowering path (which already passes the dep-

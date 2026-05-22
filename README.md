@@ -95,7 +95,10 @@ Not yet supported: MySQL, non-Go client SDKs, multi-region deployments.
 
 ## License
 
-Licensed under [BSL 1.1](LICENSE). Free for internal and production use. Converts to Apache 2.0 four years after each release. Reselling atlantis as a hosted service is the only restriction.
+- **Server** (this repository, except `clients/go/`) — [BSL 1.1](LICENSE). Production use is permitted except offering atlantis on a hosted or embedded basis in competition with the licensor's paid versions. Converts to Apache 2.0 on 2030-05-21.
+- **SDK** (`clients/go/`) — [Apache 2.0](clients/go/LICENSE). Apps that link this SDK are unrestricted; only the atlantis server itself is under BSL.
+
+See [`clients/go/README.md`](clients/go/README.md) for how the SDK is generated and how it connects to a server.
 
 ## Naming
 

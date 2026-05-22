@@ -67,7 +67,7 @@ func cmdPlan(args []string) int {
 		fmt.Fprintln(os.Stderr, "tide:", err)
 		return 3
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var resp planResponse
 	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/PlanSchema",

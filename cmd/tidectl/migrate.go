@@ -20,8 +20,8 @@ import (
 
 const migrationsTable = "atlantis_schema_migrations"
 
-func cmdMigrateUp(args []string) int    { return runMigrate(args, "up") }
-func cmdMigrateDown(args []string) int  { return runMigrate(args, "down", "1") }
+func cmdMigrateUp(args []string) int   { return runMigrate(args, "up") }
+func cmdMigrateDown(args []string) int { return runMigrate(args, "down", "1") }
 
 func runMigrate(args []string, migrateArgs ...string) int {
 	fs := flagSet("migrate")

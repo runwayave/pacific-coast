@@ -335,36 +335,36 @@ func extract%sCursor(ent *pb.%s, orders []*pb.%sOrderBy) []any {
 
 `,
 		e.Name, e.Name, // Query<E> implements pb.<E>ServiceServer (in doc)
-		srv, e.Name, e.Name, e.Name,   // func sig
-		lowerFirst(e.Name),             // <e>QueryTimeoutMS
+		srv, e.Name, e.Name, e.Name, // func sig
+		lowerFirst(e.Name), // <e>QueryTimeoutMS
 		queryDefaultLimit,
 		queryMaxLimit,
 		queryMaxLimit,
-		e.ID(),                         // Generation entity
-		e.ID(),                         // Hash entity
-		e.ID(),                         // Lookup entity
-		e.Name,                         // assembleQuery<E>FromPKs (hit-path call)
-		e.Name,                         // build<E>KeysetCols
-		e.ID(),                         // DecodePageToken expectedEntityID
+		e.ID(), // Generation entity
+		e.ID(), // Hash entity
+		e.ID(), // Lookup entity
+		e.Name, // assembleQuery<E>FromPKs (hit-path call)
+		e.Name, // build<E>KeysetCols
+		e.ID(), // DecodePageToken expectedEntityID
 		extrasInit.String(),
 		specVar, startingPH,
 		partitionArgInsert,
-		e.Name,                         // sqlQuery<E>Prefix
-		e.Name,                         // resp type Query<E>Response
-		e.Name,                         // pb.<E>{}
-		e.Name,                         // scanInto<E>
-		e.Name,                         // extract<E>Cursor (boundary call)
-		e.ID(),                         // EncodePageToken entityID
-		includeDispatch.String(),       // include dispatch block
-		pkGoName,                       // ent.Get<Pk>()
-		e.ID(),                         // Store entity
-		lowerFirst(e.Name),             // <e>QueryCacheTTL
+		e.Name,                   // sqlQuery<E>Prefix
+		e.Name,                   // resp type Query<E>Response
+		e.Name,                   // pb.<E>{}
+		e.Name,                   // scanInto<E>
+		e.Name,                   // extract<E>Cursor (boundary call)
+		e.ID(),                   // EncodePageToken entityID
+		includeDispatch.String(), // include dispatch block
+		pkGoName,                 // ent.Get<Pk>()
+		e.ID(),                   // Store entity
+		lowerFirst(e.Name),       // <e>QueryCacheTTL
 		// assembleQuery<E>FromPKs helper
-		srv, e.Name, e.Name,            // func sig
-		e.Name,                         // resp type Query<E>Response
-		e.Name,                         // sqlBatchGet<E>
-		e.Name,                         // pb.<E>{}
-		e.Name,                         // scanInto<E>
+		srv, e.Name, e.Name, // func sig
+		e.Name, // resp type Query<E>Response
+		e.Name, // sqlBatchGet<E>
+		e.Name, // pb.<E>{}
+		e.Name, // scanInto<E>
 		// build<E>KeysetCols
 		srv, e.Name, e.Name,
 		keysetCases.String(),

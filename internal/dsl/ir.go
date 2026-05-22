@@ -22,8 +22,9 @@ import (
 //     is considered well-formed.
 //
 // Wire stability:
-//   The JSON shape of IR is a checkpoint format. Field tags are explicit; do
-//   not rename fields without bumping IR.Version and writing a migrator.
+//
+//	The JSON shape of IR is a checkpoint format. Field tags are explicit; do
+//	not rename fields without bumping IR.Version and writing a migrator.
 type IR struct {
 	Version    int               `json:"version"`
 	Entities   []Entity          `json:"entities"`
@@ -39,15 +40,15 @@ type IR struct {
 // in Touches, so an UPDATE on any touched entity invalidates every
 // cached result of this query at the next debounced bump.
 type CustomQuery struct {
-	Name       string         `json:"name"`
-	Owner      string         `json:"owner"`           // canonical "namespace.Entity" id of the `for` target
-	Inputs     []QueryParam   `json:"inputs"`
-	Output     CustomOutput   `json:"output"`
-	SQL        string         `json:"sql"`             // raw body, post-validation
-	Touches    []string       `json:"touches"`         // canonical "namespace.Entity" ids
-	Cache      *Cache         `json:"cache,omitempty"` // optional override of default 30s TTL
-	SourcePath string         `json:"source_path,omitempty"`
-	Pos        Position       `json:"-"` // not serialized; kept for error messages
+	Name       string       `json:"name"`
+	Owner      string       `json:"owner"` // canonical "namespace.Entity" id of the `for` target
+	Inputs     []QueryParam `json:"inputs"`
+	Output     CustomOutput `json:"output"`
+	SQL        string       `json:"sql"`             // raw body, post-validation
+	Touches    []string     `json:"touches"`         // canonical "namespace.Entity" ids
+	Cache      *Cache       `json:"cache,omitempty"` // optional override of default 30s TTL
+	SourcePath string       `json:"source_path,omitempty"`
+	Pos        Position     `json:"-"` // not serialized; kept for error messages
 }
 
 // ID returns the "namespace.Name" identifier for a custom
@@ -68,13 +69,13 @@ func (q *CustomQuery) ID() string {
 // external IO inside the tx — workloads requiring HTTP/Slack/etc.
 // stay hand-written in `internal/server/<name>/`.
 type CustomProcedure struct {
-	Name       string             `json:"name"`
-	Owner      string             `json:"owner"`
-	Inputs     []QueryParam       `json:"inputs"`
-	Steps      []ProcedureStepIR  `json:"steps"`
-	Invalidate string             `json:"invalidate,omitempty"` // optional tag template for bulk flush
-	SourcePath string             `json:"source_path,omitempty"`
-	Pos        Position           `json:"-"`
+	Name       string            `json:"name"`
+	Owner      string            `json:"owner"`
+	Inputs     []QueryParam      `json:"inputs"`
+	Steps      []ProcedureStepIR `json:"steps"`
+	Invalidate string            `json:"invalidate,omitempty"` // optional tag template for bulk flush
+	SourcePath string            `json:"source_path,omitempty"`
+	Pos        Position          `json:"-"`
 }
 
 // ID is the "namespace.Name" id used by callers when invoking
@@ -128,11 +129,11 @@ type ProcedureStepIR struct {
 //     are intentionally absent — a step that needs them belongs in a
 //     raw `sql touches(...) { ... }` block, not a typed step.
 type TypedStepIR struct {
-	Verb     string          `json:"verb"`      // "update", "delete", "insert"
-	TargetID string          `json:"target_id"` // canonical id
-	Assigns  []AssignmentIR  `json:"assigns,omitempty"`
-	Where    *ExprIR         `json:"where,omitempty"`
-	Pos      Position        `json:"-"`
+	Verb     string         `json:"verb"`      // "update", "delete", "insert"
+	TargetID string         `json:"target_id"` // canonical id
+	Assigns  []AssignmentIR `json:"assigns,omitempty"`
+	Where    *ExprIR        `json:"where,omitempty"`
+	Pos      Position       `json:"-"`
 }
 
 // AssignmentIR is `field = expr` in a SET or INSERT column list.
@@ -146,14 +147,14 @@ type AssignmentIR struct {
 // but with $arg references resolved to a known input name.
 type ExprIR struct {
 	Kind    ExprKind `json:"kind"`
-	Op      string   `json:"op,omitempty"`        // for "binary"
-	Left    *ExprIR  `json:"left,omitempty"`      // for "binary"
-	Right   *ExprIR  `json:"right,omitempty"`     // for "binary"
-	ArgName string   `json:"arg_name,omitempty"`  // for "arg"
-	Field   string   `json:"field,omitempty"`     // for "field"
-	LitStr  string   `json:"lit_str,omitempty"`   // for "literal_string"
-	LitInt  int64    `json:"lit_int,omitempty"`   // for "literal_int"
-	LitBool bool     `json:"lit_bool,omitempty"`  // for "literal_bool"
+	Op      string   `json:"op,omitempty"`       // for "binary"
+	Left    *ExprIR  `json:"left,omitempty"`     // for "binary"
+	Right   *ExprIR  `json:"right,omitempty"`    // for "binary"
+	ArgName string   `json:"arg_name,omitempty"` // for "arg"
+	Field   string   `json:"field,omitempty"`    // for "field"
+	LitStr  string   `json:"lit_str,omitempty"`  // for "literal_string"
+	LitInt  int64    `json:"lit_int,omitempty"`  // for "literal_int"
+	LitBool bool     `json:"lit_bool,omitempty"` // for "literal_bool"
 	// "literal_now" carries no payload.
 }
 
@@ -163,13 +164,13 @@ type ExprIR struct {
 type ExprKind string
 
 const (
-	ExprArg          ExprKind = "arg"
-	ExprField        ExprKind = "field"
-	ExprLiteralStr   ExprKind = "literal_string"
-	ExprLiteralInt   ExprKind = "literal_int"
-	ExprLiteralBool  ExprKind = "literal_bool"
-	ExprLiteralNow   ExprKind = "literal_now"
-	ExprBinary       ExprKind = "binary"
+	ExprArg         ExprKind = "arg"
+	ExprField       ExprKind = "field"
+	ExprLiteralStr  ExprKind = "literal_string"
+	ExprLiteralInt  ExprKind = "literal_int"
+	ExprLiteralBool ExprKind = "literal_bool"
+	ExprLiteralNow  ExprKind = "literal_now"
+	ExprBinary      ExprKind = "binary"
 )
 
 // RawSQLIR is a resolved raw `sql touches(...) { ... }` block. SQL is
@@ -182,19 +183,19 @@ type RawSQLIR struct {
 
 // Entity is one resolved entity or hypertable in the IR.
 type Entity struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	Name      string     `json:"name"`
+	Namespace string     `json:"namespace"`
 	Kind      EntityKind `json:"kind"`
 
 	// For hypertable kind: name of the time column. Empty otherwise.
 	TimeField string `json:"time_field,omitempty"`
 
-	Fields    []Field        `json:"fields"`
-	Indexes   []Index        `json:"indexes,omitempty"`
-	Relations []Relation     `json:"relations,omitempty"`
-	Uniques   []UniqueSpec   `json:"uniques,omitempty"`
-	Checks    []TableCheck   `json:"checks,omitempty"`
-	Cache     *Cache         `json:"cache,omitempty"`
+	Fields    []Field      `json:"fields"`
+	Indexes   []Index      `json:"indexes,omitempty"`
+	Relations []Relation   `json:"relations,omitempty"`
+	Uniques   []UniqueSpec `json:"uniques,omitempty"`
+	Checks    []TableCheck `json:"checks,omitempty"`
+	Cache     *Cache       `json:"cache,omitempty"`
 
 	// QueryTimeoutMS overrides the default per-RPC deadline. 0 means use default.
 	QueryTimeoutMS int `json:"query_timeout_ms,omitempty"`
@@ -277,12 +278,18 @@ type Field struct {
 	Name string    `json:"name"`
 	Type FieldType `json:"type"`
 
-	Primary  bool     `json:"primary,omitempty"`
-	Identity bool     `json:"identity,omitempty"` // GENERATED ALWAYS AS IDENTITY
-	Serial   bool     `json:"serial,omitempty"`   // BIGSERIAL (legacy form; bigint only)
-	NotNull  bool     `json:"not_null,omitempty"`
-	Unique   bool     `json:"unique,omitempty"`
-	Check    string   `json:"check,omitempty"`    // verbatim CHECK expression
+	Primary  bool   `json:"primary,omitempty"`
+	Identity bool   `json:"identity,omitempty"` // GENERATED ALWAYS AS IDENTITY
+	Serial   bool   `json:"serial,omitempty"`   // BIGSERIAL (legacy form; bigint only)
+	NotNull  bool   `json:"not_null,omitempty"`
+	Unique   bool   `json:"unique,omitempty"`
+	Check    string `json:"check,omitempty"` // verbatim CHECK expression
+	// Backfill is the SQL expression `tide apply --backfill` splices into
+	// a chunked UPDATE to populate this column on existing rows. The raw
+	// string is parsed and purity-checked by
+	// sqlvalidate.ValidateBackfillExpression at admin.PlanSchema time —
+	// keeping the dsl package CGO-free.
+	Backfill string   `json:"backfill,omitempty"`
 	Default  *Default `json:"default,omitempty"`
 	Ref      *Ref     `json:"ref,omitempty"`
 
@@ -395,9 +402,9 @@ type Cache struct {
 // is the target. Otherwise TargetID is the namespace.Name of the
 // referenced entity.
 type Invalidate struct {
-	Self      bool   `json:"self,omitempty"`
-	TargetID  string `json:"target_id,omitempty"`
-	Where     *InvalWhere `json:"where,omitempty"`
+	Self     bool        `json:"self,omitempty"`
+	TargetID string      `json:"target_id,omitempty"`
+	Where    *InvalWhere `json:"where,omitempty"`
 }
 
 // InvalWhere is the resolved form of an `invalidate_on where ...` clause.
@@ -637,6 +644,8 @@ func lowerField(fd *FieldDecl) (Field, []error) {
 			f.Unique = true
 		case *ModCheckDecl:
 			f.Check = m.Expr
+		case *ModBackfillDecl:
+			f.Backfill = m.Expr
 		case *ModDefaultDecl:
 			d, derr := lowerDefault(m.Value)
 			if derr != nil {
@@ -807,6 +816,7 @@ func parseTagPlaceholders(tag string) []string {
 //  9. vector(n) dimensions match across all uses of the same field.
 //     (Only relevant if we ever index across multiple vectors of mismatched
 //     dims — the index reads the field's own type so this is auto-ok.)
+//
 // 10. query_timeout must be 50ms..30s.
 func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	var errs []error
@@ -1200,7 +1210,7 @@ func lowerQuery(path string, d *QueryDecl, byID map[string]*Entity) (*CustomQuer
 	// parser; lowering picks the resolved entity ID or the column list.
 	switch {
 	case d.Output == nil:
-		errs = append(errs, fmt.Errorf("%s: query %s: missing output{} or output as ...", d.Pos, d.Name))
+		errs = append(errs, fmt.Errorf("%s: query %s: missing output{} or output as <entity>", d.Pos, d.Name))
 	case d.Output.AsEntity != nil:
 		outEnt, oerr := resolveEntityRef(*d.Output.AsEntity, byID, ownerNS)
 		if oerr != nil {

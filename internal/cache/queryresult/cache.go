@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
@@ -81,6 +82,7 @@ func (c *Cache) Lookup(ctx context.Context, entity, hash string) (Entry, bool, e
 	key := runtime.QueryResultKey(entity, hash)
 	raw, err := c.mc.Get(ctx, key)
 	if err != nil {
+		obs.CacheTier2Misses.Inc()
 		if errors.Is(err, runtime.ErrCacheMiss) {
 			return Entry{}, false, nil
 		}
@@ -88,8 +90,13 @@ func (c *Cache) Lookup(ctx context.Context, entity, hash string) (Entry, bool, e
 	}
 	p, err := decodePayload(raw)
 	if err != nil {
+		// Corrupt payload — treat as a miss; the caller falls through to
+		// recompute. Recording as miss (not hit) keeps the hit-rate
+		// metric honest.
+		obs.CacheTier2Misses.Inc()
 		return Entry{}, false, err
 	}
+	obs.CacheTier2Hits.Inc()
 	return Entry{PKs: p.PKs, NextPageToken: p.NextPageToken}, true, nil
 }
 

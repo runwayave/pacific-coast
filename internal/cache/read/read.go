@@ -13,6 +13,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
@@ -115,24 +116,30 @@ func (r *Reader) Get(ctx context.Context, entity, id string, loader Loader) ([]b
 	// Tier 0: in-process LRU.
 	bodyKey, ver, ttl, ok := r.tier0Lookup(ctx, entity, id)
 	if ok {
+		obs.CacheTier0Hits.Inc()
 		// XFetch may decide to refresh anyway.
 		if !r.xfetchShouldRefresh(ttl) {
 			return r.tier0Body(bodyKey)
 		}
 		// Fall through to memcached + loader, but the cached value remains
 		// usable if the refresh fails — that's the whole point of XFetch.
+	} else {
+		obs.CacheTier0Misses.Inc()
 	}
 
 	// Tier 1: memcached.
 	body, err := r.tier1Lookup(ctx, entity, id)
 	if err == nil {
+		obs.CacheTier1Hits.Inc()
 		r.tier0Store(entity, id, ver, body, r.cfg.DefaultTTL)
 		return body, nil
 	}
-	if !errors.Is(err, runtime.ErrCacheMiss) {
-		// A real cache error is not fatal — the loader can still serve. The
-		// integration tests verify this fall-through path.
-		_ = err
+	if errors.Is(err, runtime.ErrCacheMiss) {
+		obs.CacheTier1Misses.Inc()
+	} else {
+		// A real cache error is not fatal — the loader can still serve.
+		// The integration tests verify this fall-through path.
+		obs.CacheTier1Errors.Inc()
 	}
 
 	// Miss path: singleflight to the loader, with two refinements over a

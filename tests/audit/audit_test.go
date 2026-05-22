@@ -56,12 +56,12 @@ import (
 // caller repos in isolation — a type-checked import graph is overkill for
 // a regression gate, and false positives are cheap to silence.
 var pgMethods = map[string]struct{}{
-	"Query":    {},
-	"QueryRow": {},
-	"Exec":     {},
-	"Queue":    {}, // pgx.Batch.Queue
+	"Query":     {},
+	"QueryRow":  {},
+	"Exec":      {},
+	"Queue":     {}, // pgx.Batch.Queue
 	"SendBatch": {},
-	"CopyFrom": {},
+	"CopyFrom":  {},
 }
 
 // poolReceiverHints are receiver-identifier substrings that flip the gate.
@@ -285,12 +285,12 @@ func TestReceiverLooksLikePool(t *testing.T) {
 		src  string
 		want bool
 	}{
-		{"pool.Query(ctx, q)", true},        // Ident
-		{"r.db.Query(ctx, q)", true},        // SelectorExpr chain (struct field)
-		{"r.pool.Exec(ctx, q)", true},       // SelectorExpr, different field name
-		{"r.conn.QueryRow(ctx, q)", true},   // conn-shaped field
-		{"svc.cache.Get(ctx, k)", false},    // cache is not a pool hint
-		{"foo.Bar.Baz(x)", false},           // arbitrary chain
+		{"pool.Query(ctx, q)", true},      // Ident
+		{"r.db.Query(ctx, q)", true},      // SelectorExpr chain (struct field)
+		{"r.pool.Exec(ctx, q)", true},     // SelectorExpr, different field name
+		{"r.conn.QueryRow(ctx, q)", true}, // conn-shaped field
+		{"svc.cache.Get(ctx, k)", false},  // cache is not a pool hint
+		{"foo.Bar.Baz(x)", false},         // arbitrary chain
 	}
 	for _, tc := range cases {
 		got := receiverLooksLikePool(parse(tc.src))

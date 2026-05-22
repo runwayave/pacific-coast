@@ -216,6 +216,67 @@ func TestDiff_DefaultChanged_IsAdditive(t *testing.T) {
 	}
 }
 
+func TestDiff_BackfillAdded_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v text }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v text backfill "'x'" }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldBackfillAdded)
+	if c == nil || c.Class != ClassAdditive || c.Field != "v" {
+		t.Errorf("backfill added should be additive on v, got %+v", c)
+	}
+}
+
+func TestDiff_BackfillRemoved_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v text backfill "'x'" }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v text }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldBackfillRemoved)
+	if c == nil || c.Class != ClassAdditive {
+		t.Errorf("backfill removed should be additive, got %+v", c)
+	}
+}
+
+func TestDiff_BackfillChanged_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v text backfill "'x'" }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v text backfill "'y'" }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldBackfillChanged)
+	if c == nil || c.Class != ClassAdditive {
+		t.Errorf("backfill changed should be additive, got %+v", c)
+	}
+}
+
+func TestDiff_SerialAdded_IsBackfill(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  seq bigint }`)
+	newIR := lower(t, `entity A in x { id bigint primary  seq bigint serial }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldSerialAdded)
+	if c == nil || c.Class != ClassBackfillRequired || c.Field != "seq" {
+		t.Errorf("SERIAL added should require backfill on seq, got %+v", c)
+	}
+}
+
+func TestDiff_SerialRemoved_IsBackfill(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  seq bigint serial }`)
+	newIR := lower(t, `entity A in x { id bigint primary  seq bigint }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldSerialRemoved)
+	if c == nil || c.Class != ClassBackfillRequired || c.Field != "seq" {
+		t.Errorf("SERIAL removed should require backfill on seq, got %+v", c)
+	}
+}
+
+func TestDiff_SerialUnchanged_NoSerialDiff(t *testing.T) {
+	ir := lower(t, `entity A in x { id bigint primary  seq bigint serial }`)
+	d := ComputeDiff(ir, ir)
+	if c := findChange(t, d, KindFieldSerialAdded); c != nil {
+		t.Errorf("identical IR should not produce SerialAdded, got %+v", c)
+	}
+	if c := findChange(t, d, KindFieldSerialRemoved); c != nil {
+		t.Errorf("identical IR should not produce SerialRemoved, got %+v", c)
+	}
+}
+
 func TestDiff_ReferenceAddedToExistingColumn_IsBackfill(t *testing.T) {
 	oldIR := lower(t, `
 entity Account in x { id bigint primary }

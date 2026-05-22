@@ -312,8 +312,8 @@ func (l *Lexer) scanIdentOrKeyword(start Position) Token {
 //
 // Brace counting is SQL-string aware:
 //
-//   - Single-quoted strings (`'foo''bar'`): braces inside are ignored.
-//     `''` is the SQL escape for an embedded single quote.
+//   - Single-quoted strings (`'foo”bar'`): braces inside are ignored.
+//     `”` is the SQL escape for an embedded single quote.
 //   - Double-quoted identifiers (`"foo"`): treated like single-quoted
 //     strings for brace-counting purposes. Embedded `""` escapes.
 //   - SQL line comments (`-- ...\n`): braces inside are ignored.
@@ -378,7 +378,7 @@ func (l *Lexer) captureRawSQLBody(start Position) (Token, bool) {
 }
 
 // skipSQLString consumes a single- or double-quoted SQL string starting
-// at the current quote character. `''` (resp. `""`) is the in-string
+// at the current quote character. `”` (resp. `""`) is the in-string
 // escape for the same quote, per the SQL spec. Returns false on EOF
 // before the closing quote, so the caller can surface an unterminated-
 // string error pointing at the raw SQL block's opening `{`.

@@ -448,17 +448,6 @@ func emitPKEqFilter(b *strings.Builder, e *dsl.Entity, spec *pkSpec, varName str
 	b.WriteString("\t}\n")
 }
 
-// pkRequestAccessBatch returns the Go expression for the BatchGet
-// request's PK collection. Single-PK: `req.Get<Pk>s()` yields
-// `[]<type>`. Composite-PK: `req.GetIds()` yields `[]*<E>PK`, which
-// the BatchGet emitter unpacks by hand.
-func pkRequestAccessBatch(spec *pkSpec) string {
-	if spec.Composite {
-		return "req.GetIds()"
-	}
-	return "req.Get" + snakeToCamel(spec.Fields[0].Name) + "s()"
-}
-
 func emitProtoGetMethod(b *strings.Builder, e *dsl.Entity, srv string, spec *pkSpec) {
 	// Get is a back-compat shim over QueryX so callers using the legacy
 	// RPC name still work while we migrate them to QueryX directly. The
@@ -897,7 +886,6 @@ func (s *%s) %s(ctx context.Context, req *pb.%sRequest) (*pb.%sResponse, error) 
 		e.Name, e.Name)
 }
 
-
 // emitScanIntoProto writes scanInto<Entity>, scanInto<Entity>WithTotal,
 // and scanInto<Entity>WithDistance. Each one scans a row in SELECT order
 // (matching fieldColumns) into proto fields, using sql.NullX for nullable
@@ -905,9 +893,9 @@ func (s *%s) %s(ctx context.Context, req *pb.%sRequest) (*pb.%sResponse, error) 
 func emitScanIntoProto(b *strings.Builder, e *dsl.Entity) {
 	// Per-field scan locals + post-assign logic.
 	var (
-		localDecls    []string // "var emailLocal string"
-		scanTargets   []string // "&emailLocal"
-		postAssigns   []string // "out.Email = emailLocal"
+		localDecls  []string // "var emailLocal string"
+		scanTargets []string // "&emailLocal"
+		postAssigns []string // "out.Email = emailLocal"
 	)
 	for _, f := range e.Fields {
 		local, target, assign := protoScanFragments(f)
@@ -1046,7 +1034,6 @@ func protoBindExpr(f dsl.Field) string {
 	}
 	return coltype.BindExpr(f.Type, notNull, protoGetter, protoFieldPtr)
 }
-
 
 // pkSpec describes the primary key of an entity for the server emitter. It
 // hides the single-vs-composite split behind one set of accessor methods

@@ -178,11 +178,11 @@ func (r *bucketRegistry) take(caller string) bool {
 // rather than running a goroutine ticker — the lazy compute is cache-
 // friendly and avoids per-bucket goroutine overhead.
 type tokenBucket struct {
-	mu          sync.Mutex
-	qps         float64
-	burst       float64
-	tokens      float64
-	lastRefill  time.Time
+	mu         sync.Mutex
+	qps        float64
+	burst      float64
+	tokens     float64
+	lastRefill time.Time
 }
 
 func newTokenBucket(qps, burst int) *tokenBucket {

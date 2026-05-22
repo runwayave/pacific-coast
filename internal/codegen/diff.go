@@ -72,6 +72,24 @@ const (
 	KindIndexAdded   ChangeKind = "index_added"
 	KindIndexRemoved ChangeKind = "index_removed"
 
+	// KindFieldSerialAdded: BIGSERIAL added to an existing column.
+	// Sequence must be seeded to MAX(col)+1 before apply or new inserts
+	// collide with existing rows.
+	KindFieldSerialAdded ChangeKind = "field_serial_added"
+	// KindFieldSerialRemoved: BIGSERIAL removed. Callers that relied on
+	// auto-increment must now supply the column explicitly.
+	KindFieldSerialRemoved ChangeKind = "field_serial_removed"
+
+	// KindFieldBackfill* track changes to the `backfill "<expr>"` field
+	// modifier. The modifier itself causes no schema change — it's the
+	// signal `tide apply --backfill` uses to know how to populate the
+	// column when an associated NOT NULL or new-NOT-NULL change needs
+	// existing-row data. Classified Additive on its own; the apply-time
+	// rejection comes from the paired NotNull change.
+	KindFieldBackfillAdded   ChangeKind = "field_backfill_added"
+	KindFieldBackfillRemoved ChangeKind = "field_backfill_removed"
+	KindFieldBackfillChanged ChangeKind = "field_backfill_changed"
+
 	KindCacheChanged ChangeKind = "cache_changed"
 
 	KindQueryTimeoutChanged ChangeKind = "query_timeout_changed"
@@ -312,6 +330,68 @@ func diffField(entityID string, oldF, newF *dsl.Field, d *Diff) {
 			Detail:   "DEFAULT changed",
 			From:     oldF.Default,
 			To:       newF.Default,
+		})
+	}
+
+	// Backfill expression changes. The modifier is metadata for
+	// `tide apply --backfill`; the schema itself doesn't change so every
+	// transition is additive. A paired NOT-NULL tightening on the same
+	// field still gets classified BackfillRequired by the existing
+	// branches above — that's what gates plain `tide apply`.
+	switch {
+	case oldF.Backfill == "" && newF.Backfill != "":
+		d.append(Change{
+			Kind:     KindFieldBackfillAdded,
+			Class:    ClassAdditive,
+			EntityID: entityID,
+			Field:    newF.Name,
+			Detail:   fmt.Sprintf("backfill expression added: %s", newF.Backfill),
+			To:       newF.Backfill,
+		})
+	case oldF.Backfill != "" && newF.Backfill == "":
+		d.append(Change{
+			Kind:     KindFieldBackfillRemoved,
+			Class:    ClassAdditive,
+			EntityID: entityID,
+			Field:    newF.Name,
+			Detail:   "backfill expression removed",
+			From:     oldF.Backfill,
+		})
+	case oldF.Backfill != "" && newF.Backfill != "" && oldF.Backfill != newF.Backfill:
+		d.append(Change{
+			Kind:     KindFieldBackfillChanged,
+			Class:    ClassAdditive,
+			EntityID: entityID,
+			Field:    newF.Name,
+			Detail:   "backfill expression changed",
+			From:     oldF.Backfill,
+			To:       newF.Backfill,
+		})
+	}
+
+	// SERIAL (BIGSERIAL) changes. Both directions are backfill-required
+	// because either side needs out-of-band coordination: adding serial
+	// needs the sequence seeded to MAX(col)+1 so the next auto-generated
+	// id doesn't collide with existing rows; removing serial means every
+	// caller that relied on auto-increment must now supply the column
+	// explicitly on INSERT, which is a behaviour change verified by
+	// hand rather than auto-detected by the diff engine.
+	switch {
+	case !oldF.Serial && newF.Serial:
+		d.append(Change{
+			Kind:     KindFieldSerialAdded,
+			Class:    ClassBackfillRequired,
+			EntityID: entityID,
+			Field:    newF.Name,
+			Detail:   "SERIAL added — seed sequence to MAX(col)+1 before apply",
+		})
+	case oldF.Serial && !newF.Serial:
+		d.append(Change{
+			Kind:     KindFieldSerialRemoved,
+			Class:    ClassBackfillRequired,
+			EntityID: entityID,
+			Field:    newF.Name,
+			Detail:   "SERIAL removed — callers must now supply the column explicitly",
 		})
 	}
 

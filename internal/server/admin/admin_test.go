@@ -87,8 +87,10 @@ func TestComputeMergedSchemaVersion_StableForIdenticalInput(t *testing.T) {
 		{caller: "backend", path: "auth/schema.pc", content: "entity A in x {}"},
 		{caller: "vendor-platform", path: "catalog/schema.pc", content: "entity B in x {}"},
 	}
-	if computeMergedSchemaVersion(entries) != computeMergedSchemaVersion(entries) {
-		t.Errorf("version is not deterministic across calls")
+	v1 := computeMergedSchemaVersion(entries)
+	v2 := computeMergedSchemaVersion(entries)
+	if v1 != v2 {
+		t.Errorf("version is not deterministic across calls: %s vs %s", v1, v2)
 	}
 }
 

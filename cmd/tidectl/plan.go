@@ -19,10 +19,10 @@ import (
 //
 // Exit code:
 //
-//   0 — plan emitted (or no changes).
-//   1 — plan emitted but contains backfill-required or breaking changes;
-//       caller must add --destructive to the approve step.
-//   2 — bad args / IO error.
+//	0 — plan emitted (or no changes).
+//	1 — plan emitted but contains backfill-required or breaking changes;
+//	    caller must add --destructive to the approve step.
+//	2 — bad args / IO error.
 //
 // A staged migration is named NNNN_tidectl_staged.up.sql / .down.sql, where
 // NNNN is the next sequence number derived from the existing migrations

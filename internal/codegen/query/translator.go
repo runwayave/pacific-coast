@@ -17,9 +17,9 @@ import (
 //   - msg:              the filter message (nil or zero-value → no-op).
 //   - placeholderStart: $N of the first arg this call will allocate.
 //   - extraPredicates:  pre-built SQL fragments AND-joined onto the user filter
-//                       AFTER normalization (auth, partition, cursor predicates).
-//                       Each entry must already use placeholders that don't
-//                       collide with placeholderStart..placeholderStart+returned.
+//     AFTER normalization (auth, partition, cursor predicates).
+//     Each entry must already use placeholders that don't
+//     collide with placeholderStart..placeholderStart+returned.
 //
 // Returns the WHERE fragment without a leading "WHERE", the bind args, and
 // the number of placeholders consumed (so the caller can resume numbering
@@ -31,9 +31,9 @@ func TranslateFilter(
 	extraPredicates ...string,
 ) (sqlFragment string, args []any, consumed int, err error) {
 	w := walker{
-		spec:        spec,
-		nextPH:      placeholderStart,
-		startingPH:  placeholderStart,
+		spec:       spec,
+		nextPH:     placeholderStart,
+		startingPH: placeholderStart,
 	}
 
 	var userPart string

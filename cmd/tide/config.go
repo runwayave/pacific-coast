@@ -24,10 +24,10 @@ import (
 // Every field is overridable via env (ATL_CALLER, ATL_ENDPOINT, TIDE_TLS_*) so
 // CI runners can configure the same `tide` binary without touching tide.yaml.
 type tideConfig struct {
-	Caller       string   `yaml:"caller"`
-	Endpoint     string   `yaml:"endpoint"`
-	SchemaPaths  []string `yaml:"schema_paths"`
-	TLS          struct {
+	Caller      string   `yaml:"caller"`
+	Endpoint    string   `yaml:"endpoint"`
+	SchemaPaths []string `yaml:"schema_paths"`
+	TLS         struct {
 		Cert string `yaml:"cert"`
 		Key  string `yaml:"key"`
 		CA   string `yaml:"ca"`

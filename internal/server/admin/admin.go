@@ -31,6 +31,7 @@ type Service struct {
 	mirrorDir          string
 	mirrorEnabled      bool
 	allowApplyMutation bool
+	backfillEnabled    bool
 }
 
 // Config holds optional toggles; the zero value is read-only with no mirror.
@@ -44,6 +45,12 @@ type Config struct {
 	// AllowApplyMutation enables the ApplyMigration RPC. False rejects
 	// every apply with codes.PermissionDenied.
 	AllowApplyMutation bool
+
+	// BackfillEnabled gates the BeginBackfillPlan RPC. Default false so
+	// a server running without the backfill worker can't accept plans
+	// that would pile up unprocessed. Operator sets this to true after
+	// canarying the feature.
+	BackfillEnabled bool
 }
 
 // New returns a Service backed by pool.
@@ -53,6 +60,7 @@ func New(pool *pgxpool.Pool, cfg Config) *Service {
 		mirrorDir:          cfg.MirrorDir,
 		mirrorEnabled:      cfg.MirrorEnabled,
 		allowApplyMutation: cfg.AllowApplyMutation,
+		backfillEnabled:    cfg.BackfillEnabled,
 	}
 }
 
@@ -86,6 +94,16 @@ type PlanResponse struct {
 
 	// CustomCount tallies custom queries and procedures in the new IR.
 	CustomCount CustomDeclCount
+
+	// Phase-split outputs for `tide apply --backfill`. Empty for non-
+	// backfill plans. BackfillFields drives the chunked-UPDATE worker:
+	// one entry per field, with the user expression + PK column already
+	// resolved against the new IR.
+	PreBackfillUpSQL       string
+	PreBackfillIndexesSQL  string
+	PostBackfillUpSQL      string
+	PostBackfillIndexesSQL string
+	BackfillFields         []BackfillFieldRef
 }
 
 // CustomDeclCount tallies custom queries and procedures.
@@ -98,10 +116,10 @@ type CustomDeclCount struct {
 type ClassName string
 
 const (
-	ClassAdditive   ClassName = "additive"
-	ClassBackfill   ClassName = "backfill_required"
-	ClassBreaking   ClassName = "cross_caller_breaking"
-	ClassUnclean    ClassName = "unparseable" // returned when DSL itself doesn't parse
+	ClassAdditive ClassName = "additive"
+	ClassBackfill ClassName = "backfill_required"
+	ClassBreaking ClassName = "cross_caller_breaking"
+	ClassUnclean  ClassName = "unparseable" // returned when DSL itself doesn't parse
 )
 
 // ImpactEntry describes how one caller is affected by a plan; includes the plan's own caller.
@@ -115,7 +133,7 @@ type ImpactEntry struct {
 type ApplyRequest struct {
 	Caller string
 	PlanID string
-	UpSQL  string          // re-submitted by caller to detect drift since planning
+	UpSQL  string // re-submitted by caller to detect drift since planning
 	Files  []SubmittedFile
 }
 
@@ -219,6 +237,11 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 			Queries:    len(newIR.Queries),
 			Procedures: len(newIR.Procedures),
 		},
+		PreBackfillUpSQL:       scripts.PreBackfillUp,
+		PreBackfillIndexesSQL:  scripts.PreBackfillIndexes,
+		PostBackfillUpSQL:      scripts.PostBackfillUp,
+		PostBackfillIndexesSQL: scripts.PostBackfillIndexes,
+		BackfillFields:         translateBackfillFields(scripts.BackfillFields),
 	}
 	for _, ch := range d.Breaking {
 		resp.BreakingDetail = append(resp.BreakingDetail,
@@ -229,6 +252,26 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 		resp.Class = ClassUnclean
 	}
 	return resp, nil
+}
+
+// translateBackfillFields converts the codegen-side BackfillField slice
+// to the admin-wire BackfillFieldRef slice so callers don't import
+// internal/codegen.
+func translateBackfillFields(in []codegen.BackfillField) []BackfillFieldRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]BackfillFieldRef, len(in))
+	for i, f := range in {
+		out[i] = BackfillFieldRef{
+			EntityID:   f.EntityID,
+			Field:      f.Field,
+			Expression: f.Expression,
+			PKColumn:   f.PKColumn,
+			TableName:  f.TableName,
+		}
+	}
+	return out
 }
 
 // validateCustomSQL runs pg_query_go validation over every custom query and procedure.
@@ -261,6 +304,13 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 	}
 	if req.PlanID == "" {
 		return nil, errors.New("admin: plan_id is required")
+	}
+
+	// Refuse to apply on top of an in-flight backfill — between Phase 1
+	// and Phase 3 the schema is in a partially-applied state and a
+	// concurrent unrelated apply can leave it corrupted.
+	if planHash, inflight, err := hasInflightBackfill(ctx, s.pool, req.Caller); err == nil && inflight {
+		return nil, fmt.Errorf("admin: backfill %s is in flight for this caller — wait for it to complete (or fail) before applying", planHash)
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})

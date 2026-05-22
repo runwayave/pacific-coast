@@ -16,24 +16,24 @@ import (
 // Inputs:
 //   - entityID:   "namespace.Entity" (e.g. "consumer.Account")
 //   - filter:     the request's <Entity>Filter proto. Nil → no-filter
-//                 contribution (the bytes "0:" appear in the hash).
+//     contribution (the bytes "0:" appear in the hash).
 //   - orders:     repeated <Entity>OrderBy proto messages. Each one's
-//                 deterministic-marshaled bytes contribute to the hash
-//                 in the caller-supplied order. The caller-supplied
-//                 order matters — orderby is semantically ordered.
+//     deterministic-marshaled bytes contribute to the hash
+//     in the caller-supplied order. The caller-supplied
+//     order matters — orderby is semantically ordered.
 //   - limit:      varint-encoded request limit.
 //   - pageToken:  raw bytes of the opaque cursor (treated as []byte).
 //   - fields:     google.protobuf.FieldMask proto. Nil → no-mask
-//                 contribution (which the form treats as
-//                 "all fields"; codegen produces a default empty mask
-//                 for that case so the hash is stable).
+//     contribution (which the form treats as
+//     "all fields"; codegen produces a default empty mask
+//     for that case so the hash is stable).
 //   - includes:   the request's `repeated <Entity>Include includes` —
-//                 sorted by numeric value before hashing for canonical
-//                 stability.
+//     sorted by numeric value before hashing for canonical
+//     stability.
 //   - generation: the per-entity counter value from
-//                 (*Cache).Generation. Folding the counter into the
-//                 hash key is what makes a generation-bump invalidate
-//                 every cached entry for the entity at once.
+//     (*Cache).Generation. Folding the counter into the
+//     hash key is what makes a generation-bump invalidate
+//     every cached entry for the entity at once.
 //
 // Returns the 22-char base64url-encoded 128-bit (16-byte) prefix of a
 // sha256 digest. 128 bits is well past collision-resistant for the

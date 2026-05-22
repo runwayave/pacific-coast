@@ -50,7 +50,11 @@ codegen: ## Regenerate proto, server, client, sql from .atl; then buf generate; 
 	cd clients/go && $(GO) build ./...
 	# gen/ is optional on fresh clones (no .atl fixtures → no generated code).
 	$(GO) build ./cmd/tide ./cmd/tidectl ./internal/...
-	@if [ -d gen ]; then $(GO) build ./gen/... ./cmd/server; fi
+	# Check for actual .go files, not just dir existence — an empty
+	# leftover gen/ from a previous run would otherwise trip the build.
+	@if [ -n "$$(find gen -type f -name '*.go' 2>/dev/null)" ]; then \
+		$(GO) build ./gen/... ./cmd/server; \
+	fi
 
 .PHONY: proto
 proto: ## Run buf generate against the regenerated .proto tree
@@ -209,10 +213,19 @@ tidy: ## go mod tidy
 # ---------- CI gates ----------
 
 # codegen-check: re-run codegen and fail if gen/, clients/go/, or atlantis/*.proto diverges. CI gate.
+#
+# `mkdir -p` on both sides of each diff handles the gen-less-repo case:
+# on a fresh clone with no .atl fixtures the output dirs don't exist at
+# all, and `diff -ruN` (which treats absent FILES as empty) still errors
+# on a missing root directory. The mkdirs make both sides empty-but-
+# present so an absent .atl fixture diffs cleanly.
 .PHONY: codegen-check
 codegen-check: ## Verify gen/ + clients/go/ + atlantis/*.proto are up to date with current .atl files
 	@tmp=$$(mktemp -d) && \
 	  $(GO) run ./cmd/tidectl codegen --out "$$tmp" --ir-checkpoint gen/.last-ir.json && \
+	  mkdir -p gen "$$tmp/gen" clients/go/client "$$tmp/clients/go/client" \
+	           atlantis/consumer "$$tmp/atlantis/consumer" \
+	           atlantis/vendorpkg "$$tmp/atlantis/vendorpkg" && \
 	  diff -ruN gen "$$tmp/gen" >/dev/null && \
 	  diff -ruN clients/go/client "$$tmp/clients/go/client" >/dev/null && \
 	  diff -ruN atlantis/consumer "$$tmp/atlantis/consumer" >/dev/null && \
@@ -221,12 +234,17 @@ codegen-check: ## Verify gen/ + clients/go/ + atlantis/*.proto are up to date wi
 	  (echo "codegen-check FAILED. Run 'make codegen' and commit the diff."; rm -rf "$$tmp"; exit 1)
 
 # CI gate: up/down/up against fresh DB to catch broken .down.sql.
+#
+# Scoped to the infra history only. The tidectl history lives under
+# .dev/migrations/tidectl/ which is gitignored — it's populated per-
+# operator by `tidectl plan/approve` against their own .atl files and
+# never lands in this repo, so CI can't roundtrip it.
 .PHONY: migrate-roundtrip
-migrate-roundtrip: ## Verify every migration is reversible against a fresh DB
+migrate-roundtrip: ## Verify every infra migration is reversible against a fresh DB
 	@which migrate >/dev/null || (echo "install golang-migrate: brew install golang-migrate" && exit 1)
-	migrate -path $(MIGRATIONS_DIR) -database "$(MIGRATE_URL)" up
-	migrate -path $(MIGRATIONS_DIR) -database "$(MIGRATE_URL)" down -all
-	migrate -path $(MIGRATIONS_DIR) -database "$(MIGRATE_URL)" up
+	migrate -path $(MIGRATIONS_INFRA_DIR) -database "$(MIGRATE_URL_INFRA)" up
+	migrate -path $(MIGRATIONS_INFRA_DIR) -database "$(MIGRATE_URL_INFRA)" down -all
+	migrate -path $(MIGRATIONS_INFRA_DIR) -database "$(MIGRATE_URL_INFRA)" up
 	@echo "migrate-roundtrip ok"
 
 # ---------- clean ----------

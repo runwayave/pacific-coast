@@ -61,8 +61,8 @@ type config struct {
 	// production (operators apply migrations explicitly via tidectl /
 	// golang-migrate); compose / make dev-isolated flip this on so first-
 	// day workflows don't need an extra step.
-	AutoMigrate    bool
-	MigrationsDir  string
+	AutoMigrate   bool
+	MigrationsDir string
 
 	// Schema-management toggles surfaced to the admin Service.
 	//
@@ -81,8 +81,17 @@ type config struct {
 	AdminMirrorDir          string
 	AdminAllowApplyMutation bool
 
+	// BackfillWorkerEnabled toggles the chunked-UPDATE backfill worker
+	// + the BeginBackfillPlan admin RPC. Default false in v0.1.0 until
+	// the feature is canaried in staging.
+	BackfillWorkerEnabled bool
+
 	// Observability
 	LogLevel string
+
+	// Health HTTP server (k8s probes hit this on a separate port).
+	HealthAddr         string
+	HealthProbeTimeout time.Duration
 }
 
 // loadConfig reads env vars with sensible defaults. Returns an error iff a
@@ -127,7 +136,12 @@ func loadConfig() (config, error) {
 		AdminMirrorDir:          envStr("ATL_MIRROR_DIR", "schema"),
 		AdminAllowApplyMutation: envBool("ATL_ALLOW_APPLY_MUTATION", false),
 
+		BackfillWorkerEnabled: envBool("ATL_BACKFILL_WORKER_ENABLED", false),
+
 		LogLevel: envStr("LOG_LEVEL", "info"),
+
+		HealthAddr:         envStr("HEALTH_LISTEN", ":8081"),
+		HealthProbeTimeout: envDuration("HEALTH_PROBE_TIMEOUT", time.Second),
 	}
 	if c.PGURL == "" {
 		return c, fmt.Errorf("PG_URL is required")

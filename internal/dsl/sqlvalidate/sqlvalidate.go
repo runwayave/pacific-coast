@@ -452,7 +452,7 @@ func checkTouchesCoverage(declared []string, referenced []string, context string
 // Skipped contexts:
 //
 //   - Inside single-quoted SQL strings (`'...'`). `'$foo'` is a literal
-//     value, not a parameter. Same for embedded `''` escapes.
+//     value, not a parameter. Same for embedded `”` escapes.
 //   - Inside double-quoted SQL identifiers (`"...$foo..."`). Real PG
 //     identifiers can contain `$` so we leave them untouched.
 //   - Already-numeric `$<digit>` shapes pass through unchanged.

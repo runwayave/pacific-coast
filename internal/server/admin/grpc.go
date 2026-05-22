@@ -58,6 +58,8 @@ type AdminServer interface {
 	PlanSchema(context.Context, PlanRequest) (*PlanResponse, error)
 	ApplyMigration(context.Context, ApplyRequest) (*ApplyResponse, error)
 	GetMergedSchema(context.Context, GetMergedSchemaRequest) (*GetMergedSchemaResponse, error)
+	BeginBackfillPlan(context.Context, BeginBackfillPlanRequest) (*BeginBackfillPlanResponse, error)
+	GetBackfillStatus(context.Context, GetBackfillStatusRequest) (*GetBackfillStatusResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -82,6 +84,8 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "PlanSchema", Handler: handlePlanSchema},
 		{MethodName: "ApplyMigration", Handler: handleApplyMigration},
 		{MethodName: "GetMergedSchema", Handler: handleGetMergedSchema},
+		{MethodName: "BeginBackfillPlan", Handler: handleBeginBackfillPlan},
+		{MethodName: "GetBackfillStatus", Handler: handleGetBackfillStatus},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "atlantis/admin/v1/admin.proto",
@@ -185,6 +189,70 @@ func handleGetMergedSchema(srv any, ctx context.Context, dec func(any) error, in
 
 func invokeGetMergedSchema(svc *Service, ctx context.Context, req *GetMergedSchemaRequest) (any, error) {
 	resp, err := svc.GetMergedSchema(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleBeginBackfillPlan(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req BeginBackfillPlanRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeBeginBackfillPlan(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/BeginBackfillPlan"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeBeginBackfillPlan(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeBeginBackfillPlan(svc *Service, ctx context.Context, req *BeginBackfillPlanRequest) (any, error) {
+	resp, err := svc.BeginBackfillPlan(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetBackfillStatus(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetBackfillStatusRequest
+	if len(in.Raw) > 0 {
+		if err := json.Unmarshal(in.Raw, &req); err != nil {
+			return nil, err
+		}
+	}
+	if interceptor == nil {
+		return invokeGetBackfillStatus(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetBackfillStatus"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetBackfillStatus(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetBackfillStatus(svc *Service, ctx context.Context, req *GetBackfillStatusRequest) (any, error) {
+	resp, err := svc.GetBackfillStatus(ctx, *req)
 	if err != nil {
 		return nil, err
 	}

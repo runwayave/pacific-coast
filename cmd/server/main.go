@@ -9,8 +9,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -22,10 +24,13 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
+	"github.com/rachitkumar205/atlantis/internal/auth"
+	"github.com/rachitkumar205/atlantis/internal/backfill"
 	"github.com/rachitkumar205/atlantis/internal/cache/invalidate"
 	"github.com/rachitkumar205/atlantis/internal/cache/memcached"
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/cache/read"
+	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
@@ -79,6 +84,20 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	defer pool.Close()
 	log.Info("pg pool ready", "max_conns", cfg.PGMaxConns)
 
+	obs.RegisterPoolStats(nil, pool.Raw())
+
+	// Auth allowlist is loaded once at startup and refreshed on its own
+	// goroutine. The refresher uses a ctx detached from SIGTERM so a
+	// blocking reload during shutdown doesn't lock callers out mid-drain.
+	authAllowlist := auth.New(pool.Raw(), log.With("component", "auth"))
+	if err := authAllowlist.Reload(ctx); err != nil {
+		return fmt.Errorf("load auth allowlist: %w", err)
+	}
+	log.Info("auth allowlist ready", "callers", authAllowlist.Size())
+	allowlistCtx, cancelAllowlist := context.WithCancel(context.Background())
+	defer cancelAllowlist()
+	go authAllowlist.RunRefresher(allowlistCtx, 30*time.Second)
+
 	mc, err := memcached.New(memcached.Config{
 		Addrs:        cfg.MemcachedAddrs,
 		Timeout:      cfg.MemcachedTimeout,
@@ -117,12 +136,37 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		return err
 	}
 
+	// Worker uses a ctx detached from SIGTERM so it keeps draining during
+	// the gRPC GracefulStop window. cancelWorker fires post-GracefulStop.
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	defer cancelWorker()
+
 	var workerWG sync.WaitGroup
 	workerWG.Add(1)
 	go func() {
 		defer workerWG.Done()
-		if err := worker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("outbox worker panic", "panic", rec)
+			}
+		}()
+		if err := worker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("outbox worker exited", "err", err)
+		}
+	}()
+
+	log.Debug("init: health http server")
+	healthHTTP := newHealthServer(cfg.HealthAddr, healthDeps{
+		Pool:               pool.Raw(),
+		MC:                 mc,
+		Worker:             worker,
+		WorkerMaxStaleness: 3 * cfg.OutboxDrainInterval,
+		ProbeTimeout:       cfg.HealthProbeTimeout,
+	}, ctx)
+	go func() {
+		log.Info("health http listening", "addr", cfg.HealthAddr)
+		if err := healthHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("health http server", "err", err)
 		}
 	}()
 
@@ -142,11 +186,28 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	})
 
 	log.Debug("init: grpc.NewServer")
+	authInt := interceptors.NewAuth(interceptors.AuthConfig{
+		Allowlist:         authAllowlist,
+		Enforce:           cfg.TLSCertFile != "",
+		CallerFromContext: callerFromContext,
+		ExemptPrefixes: []string{
+			// Admin RPCs are the bootstrap path: a new caller registers
+			// their schema via PlanSchema + ApplyMigration before they
+			// can be in the allowlist for entity RPCs.
+			"/atlantis.admin.v1.Admin/",
+			// k8s health probes and reflection tooling.
+			"/grpc.health.v1.Health/",
+			"/grpc.reflection.",
+		},
+	})
+
 	srv := grpc.NewServer(
 		grpc.Creds(creds),
 		grpc.ChainUnaryInterceptor(
 			recoveryInterceptor(log),
+			interceptors.NewMetrics(),
 			resolveCallerInterceptor(),
+			authInt,
 			rateLimit,
 			loggingInterceptor(log),
 		),
@@ -163,7 +224,35 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		MirrorDir:          cfg.AdminMirrorDir,
 		MirrorEnabled:      cfg.AdminMirrorSchema,
 		AllowApplyMutation: cfg.AdminAllowApplyMutation,
+		BackfillEnabled:    cfg.BackfillWorkerEnabled,
 	}))
+
+	// Backfill worker — gated by ATL_BACKFILL_WORKER_ENABLED. Shares
+	// workerCtx with the invalidate worker so SIGTERM stops both, and
+	// uses defer-recover so a panic in one row's chunk doesn't take the
+	// process down.
+	if cfg.BackfillWorkerEnabled {
+		bfWorker := backfill.NewWorker(pool.Raw(), backfill.Config{
+			Schema:       "atlantis",
+			PollInterval: time.Second,
+			ChunkSize:    10000,
+			Throttle:     100 * time.Millisecond,
+			Logger:       log.With("component", "backfill-worker"),
+		})
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Error("backfill worker panic", "panic", rec)
+				}
+			}()
+			if err := bfWorker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error("backfill worker exited", "err", err)
+			}
+		}()
+		log.Info("backfill worker enabled")
+	}
 
 	log.Debug("init: register entity services")
 	entityserver.Register(srv, entityserver.ServerDeps{
@@ -211,7 +300,25 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		log.Warn("graceful shutdown timed out; forcing")
 		srv.Stop()
 	}
+
+	// Final drain pass: stop the worker loop, wait for the goroutine,
+	// then flush rows that in-flight RPCs enqueued during GracefulStop.
+	// Otherwise a pod restart leaves pending invalidations for the next
+	// pod and readers see stale cache in the gap.
+	cancelWorker()
 	workerWG.Wait()
+
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelDrain()
+	if err := worker.Drain(drainCtx); err != nil {
+		log.Warn("final outbox drain incomplete", "err", err)
+	}
+
+	healthShutdownCtx, cancelHealthShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelHealthShutdown()
+	if err := healthHTTP.Shutdown(healthShutdownCtx); err != nil {
+		log.Warn("health http shutdown", "err", err)
+	}
 	return nil
 }
 

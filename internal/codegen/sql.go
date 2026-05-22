@@ -29,10 +29,45 @@ import (
 //   - Schema-qualified atlantis.* names are used throughout, with no
 //     search_path manipulation, so the emitted SQL is safe to run from any
 //     role with sufficient privileges.
-// SQLScripts is the paired up/down migration output of one emit pass.
+//
+// SQLScripts is the migration output of one emit pass. Up + Down are the
+// legacy single-script forms — what plain `tide apply` consumes. The four
+// PreBackfill / PostBackfill fields and BackfillFields are populated when
+// the diff contains at least one field with a `backfill` modifier paired
+// with a NOT-NULL change; `tide apply --backfill` runs them in order
+// around the chunked UPDATE loop:
+//
+//	PreBackfillUp       — additive parts + ADD COLUMN nullable for backfilled fields
+//	PreBackfillIndexes  — CREATE INDEX CONCURRENTLY ... WHERE field IS NULL
+//	(chunked UPDATE loop runs here, driven by BackfillFields)
+//	PostBackfillUp      — ALTER COLUMN SET NOT NULL on backfilled fields
+//	PostBackfillIndexes — DROP INDEX CONCURRENTLY (mirror of the partial idx)
+//
+// For non-backfill plans the four scripts are empty strings and
+// BackfillFields is nil — callers treat "PostBackfillUp == ”" as the
+// no-phase-split signal.
 type SQLScripts struct {
 	Up   string
 	Down string
+
+	PreBackfillUp       string
+	PreBackfillIndexes  string
+	PostBackfillUp      string
+	PostBackfillIndexes string
+
+	BackfillFields []BackfillField
+}
+
+// BackfillField is one entry in the chunked-UPDATE driver list. The admin
+// RPC turns these into atlantis.backfill_field_state rows that the
+// background worker drains. TableName is schema-qualified and pre-quoted
+// so the splicer can embed it verbatim.
+type BackfillField struct {
+	EntityID   string `json:"entity_id"`
+	Field      string `json:"field"`
+	Expression string `json:"expression"`
+	PKColumn   string `json:"pk_column"`
+	TableName  string `json:"table_name"`
 }
 
 // EmitSQL emits one migration covering every change in d, against the new IR
@@ -71,7 +106,189 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 		down.line("-- (no schema changes)")
 	}
 
-	return SQLScripts{Up: up.String(), Down: down.String()}, nil
+	scripts := SQLScripts{Up: up.String(), Down: down.String()}
+	// Phase-split scripts are emitted in a separate pass because they
+	// have different routing rules (NOT NULL deferred to post, partial
+	// index on the NULL set bracketing the chunked backfill loop).
+	// Populated only when the diff contains a backfilled field paired
+	// with a NOT NULL tightening or new-NOT-NULL — otherwise the four
+	// PreBackfill* / PostBackfill* fields stay empty and callers fall
+	// through to plain `tide apply`.
+	if needsPhaseSplit(d, newByID) {
+		pre, preIdx, post, postIdx, fields := buildPhaseSplit(d, newByID, oldByID)
+		scripts.PreBackfillUp = pre.String()
+		scripts.PreBackfillIndexes = preIdx.String()
+		scripts.PostBackfillUp = post.String()
+		scripts.PostBackfillIndexes = postIdx.String()
+		scripts.BackfillFields = fields
+	}
+	return scripts, nil
+}
+
+// needsPhaseSplit returns true iff the diff requires the apply to split
+// around a chunked backfill — i.e., a field has Backfill != "" and is
+// involved in a NOT NULL tightening or new-NOT-NULL change.
+func needsPhaseSplit(d *Diff, newByID map[string]*dsl.Entity) bool {
+	for _, ch := range d.BackfillRequired {
+		if isBackfilledFieldInDiff(ch, newByID) {
+			return true
+		}
+	}
+	for _, ch := range d.Additive {
+		if isBackfilledFieldInDiff(ch, newByID) {
+			return true
+		}
+	}
+	return false
+}
+
+func isBackfilledFieldInDiff(ch Change, newByID map[string]*dsl.Entity) bool {
+	if ch.Kind != KindFieldAdded && ch.Kind != KindFieldNotNullTightened {
+		return false
+	}
+	e := newByID[ch.EntityID]
+	if e == nil {
+		return false
+	}
+	f := e.FindField(ch.Field)
+	if f == nil || f.Backfill == "" {
+		return false
+	}
+	// FieldAdded counts only when the new field is NOT NULL — otherwise
+	// there's no constraint to defer.
+	if ch.Kind == KindFieldAdded && !f.NotNull {
+		return false
+	}
+	return true
+}
+
+// buildPhaseSplit walks d once more and emits the four phase-split
+// scripts. Non-backfill changes go to pre verbatim (via emitChange). For
+// each backfilled field with a NOT NULL change: the ADD COLUMN body goes
+// to pre as nullable, the SET NOT NULL goes to post, and a partial index
+// on the NULL set is created in preIdx + dropped in postIdx.
+//
+// Down emission is not phase-split — a rollback of a backfill plan is a
+// manual operator concern; the legacy Down covers it.
+func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, preIdx, post, postIdx *sqlBuilder, fields []BackfillField) {
+	pre = &sqlBuilder{}
+	preIdx = &sqlBuilder{}
+	post = &sqlBuilder{}
+	postIdx = &sqlBuilder{}
+
+	pre.line("-- atlantis migration (pre-backfill phase)")
+	pre.line("-- Runs in the apply tx before `tide apply --backfill` kicks off the chunked UPDATE.")
+	pre.blank()
+	post.line("-- atlantis migration (post-backfill phase)")
+	post.line("-- Runs after the chunked backfill completes — applies SET NOT NULL on backfilled fields.")
+	post.blank()
+	preIdx.line("-- Partial-index lifecycle for the chunked backfill. CREATE INDEX CONCURRENTLY")
+	preIdx.line("-- runs OUTSIDE a transaction; each line is its own statement.")
+	preIdx.blank()
+	postIdx.line("-- Drop the partial indexes created pre-backfill. CONCURRENTLY for parity.")
+	postIdx.blank()
+
+	deferred := map[[2]string]*dsl.Entity{}
+	throwaway := &sqlBuilder{}
+
+	for _, ch := range d.Additive {
+		emitPhaseSplitChange(ch, newByID, oldByID, pre, post, throwaway, deferred)
+	}
+	for _, ch := range d.BackfillRequired {
+		emitPhaseSplitChange(ch, newByID, oldByID, pre, post, throwaway, deferred)
+	}
+	for _, ch := range d.Breaking {
+		emitPhaseSplitChange(ch, newByID, oldByID, pre, post, throwaway, deferred)
+	}
+
+	for key, e := range deferred {
+		entityID, fieldName := key[0], key[1]
+		f := e.FindField(fieldName)
+		pk := primaryKeyColumn(e)
+		if pk == "" || f == nil {
+			preIdx.linef("-- SKIPPED: %s has no single-column PK; backfill on composite PKs is unsupported in v1", qualifiedTable(e))
+			continue
+		}
+		idxName := backfillIndexName(e, fieldName)
+		preIdx.linef("CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON %s (%s) WHERE %s IS NULL;",
+			quoteIdent(idxName), qualifiedTable(e), quoteIdent(pk), quoteIdent(fieldName))
+		postIdx.linef(`DROP INDEX CONCURRENTLY IF EXISTS "atlantis".%s;`, quoteIdent(idxName))
+		fields = append(fields, BackfillField{
+			EntityID:   entityID,
+			Field:      fieldName,
+			Expression: f.Backfill,
+			PKColumn:   pk,
+			TableName:  qualifiedTable(e),
+		})
+	}
+	return pre, preIdx, post, postIdx, fields
+}
+
+// emitPhaseSplitChange emits one change into the pre/post builders,
+// routing NOT NULL on backfilled fields to post. throwaway absorbs the
+// "down" output that emitChange always writes — phase split doesn't need
+// it.
+func emitPhaseSplitChange(ch Change, newByID, oldByID map[string]*dsl.Entity, pre, post, throwaway *sqlBuilder, deferred map[[2]string]*dsl.Entity) {
+	e := newByID[ch.EntityID]
+	if e == nil {
+		emitChange(pre, throwaway, ch, newByID, oldByID)
+		return
+	}
+	switch ch.Kind {
+	case KindFieldAdded:
+		f := e.FindField(ch.Field)
+		if f != nil && f.Backfill != "" && f.NotNull {
+			pre.linef("-- %s: %s (backfill-deferred; ADD nullable here, SET NOT NULL in post)", ch.Kind, ch.Detail)
+			emitFieldAddNullable(pre, e, f)
+			pre.blank()
+			post.linef("-- %s: %s (post-backfill SET NOT NULL)", ch.Kind, ch.Detail)
+			emitNotNull(post, e, ch.Field, true)
+			post.blank()
+			deferred[[2]string{ch.EntityID, ch.Field}] = e
+			return
+		}
+		emitChange(pre, throwaway, ch, newByID, oldByID)
+	case KindFieldNotNullTightened:
+		f := e.FindField(ch.Field)
+		if f != nil && f.Backfill != "" {
+			post.linef("-- %s: %s (post-backfill SET NOT NULL)", ch.Kind, ch.Detail)
+			emitNotNull(post, e, ch.Field, true)
+			post.blank()
+			deferred[[2]string{ch.EntityID, ch.Field}] = e
+			return
+		}
+		emitChange(pre, throwaway, ch, newByID, oldByID)
+	default:
+		emitChange(pre, throwaway, ch, newByID, oldByID)
+	}
+}
+
+// emitFieldAddNullable adds the column with NOT NULL suppressed, even if
+// f.NotNull is true. Used by the phase-split builder so the column is
+// nullable while the chunked backfill populates it; Phase 3 then runs
+// SET NOT NULL.
+func emitFieldAddNullable(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
+	nullable := *f
+	nullable.NotNull = false
+	b.linef("ALTER TABLE %s ADD COLUMN %s;", qualifiedTable(e), columnDecl(nullable))
+	if f.Ref != nil {
+		emitFKAdd(b, e, f)
+	}
+}
+
+// backfillIndexName names the partial index Phase 1 creates and Phase 3
+// drops. Shape mirrors the existing pkName / fkName / uqName helpers.
+func backfillIndexName(e *dsl.Entity, fieldName string) string {
+	return tableName(e) + "_" + fieldName + "_backfill_idx"
+}
+
+// primaryKeyColumn returns the single PK column name, or "" for a
+// composite-PK entity (which v1 doesn't support for backfill).
+func primaryKeyColumn(e *dsl.Entity) string {
+	if pf := e.PrimaryField(); pf != nil {
+		return pf.Name
+	}
+	return ""
 }
 
 func emitClass(up, down *sqlBuilder, label string, changes []Change, newByID, oldByID map[string]*dsl.Entity) {
@@ -183,6 +400,18 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 	case KindCacheChanged, KindQueryTimeoutChanged:
 		up.line("-- (no SQL: cache / query_timeout are server-side)")
 		down.line("-- (no SQL: cache / query_timeout are server-side)")
+	case KindFieldBackfillAdded, KindFieldBackfillRemoved, KindFieldBackfillChanged:
+		// The backfill modifier is metadata for `tide apply --backfill`;
+		// the schema doesn't change so no SQL is emitted in the legacy
+		// up/down. Phase-split scripts are populated separately in
+		// buildPhaseSplit.
+		up.line("-- (no SQL: backfill modifier is metadata for tide apply --backfill)")
+		down.line("-- (no SQL: backfill modifier is metadata for tide apply --backfill)")
+	case KindFieldSerialAdded, KindFieldSerialRemoved:
+		// Serial flips need operator coordination (sequence seed or caller
+		// behavior verification); no auto-SQL today.
+		up.line("-- (no SQL: serial flip requires explicit operator coordination)")
+		down.line("-- (no SQL: serial flip requires explicit operator coordination)")
 	}
 	up.blank()
 	down.blank()
@@ -435,10 +664,11 @@ func tableName(e *dsl.Entity) string {
 // columnDecl renders one column line for CREATE TABLE / ADD COLUMN.
 //
 // Identity strategy precedence:
-//   serial   → render `BIGSERIAL` as the type itself (carries the
-//              sequence + NOT NULL + DEFAULT nextval(...) implicitly).
-//   identity → render `<type> GENERATED ALWAYS AS IDENTITY`.
-//   neither  → render `<type>` with explicit NOT NULL / DEFAULT modifiers.
+//
+//	serial   → render `BIGSERIAL` as the type itself (carries the
+//	           sequence + NOT NULL + DEFAULT nextval(...) implicitly).
+//	identity → render `<type> GENERATED ALWAYS AS IDENTITY`.
+//	neither  → render `<type>` with explicit NOT NULL / DEFAULT modifiers.
 func columnDecl(f dsl.Field) string {
 	var parts []string
 	switch {
@@ -577,9 +807,9 @@ func tableNameFromID(id string) string {
 // to a hash suffix — we keep the unhashed form short by relying on
 // snake_case entity names).
 
-func pkName(e *dsl.Entity) string  { return tableName(e) + "_pkey" }
-func fkName(e *dsl.Entity, field string) string  { return tableName(e) + "_" + field + "_fkey" }
-func uqName(e *dsl.Entity, field string) string  { return tableName(e) + "_" + field + "_key" }
+func pkName(e *dsl.Entity) string               { return tableName(e) + "_pkey" }
+func fkName(e *dsl.Entity, field string) string { return tableName(e) + "_" + field + "_fkey" }
+func uqName(e *dsl.Entity, field string) string { return tableName(e) + "_" + field + "_key" }
 
 // compositeUniqueName names a multi-column UNIQUE constraint deterministically.
 // The shape is <table>_<field1>_<field2>_..._key so DROP CONSTRAINT can find it.

@@ -168,7 +168,7 @@ func %sTagKey(%s) string {
 // emitIndexKeyFn emits one IndexKey<Name> function for a btree / partial
 // index. The key shape is:
 //
-//   atl:v1:{entity}:idx:{index_name}:{sha256-of-args-hex-first-16}
+//	atl:v1:{entity}:idx:{index_name}:{sha256-of-args-hex-first-16}
 //
 // We hash the joined arg string because index args may include arbitrary
 // user-supplied text; truncating the hex preserves a high collision margin
@@ -298,7 +298,7 @@ func partialPredSuffix(p *dsl.PartialPred) string {
 // independent of the server / client row types (no circular imports) and
 // makes the API self-documenting at call sites:
 //
-//   key := SavedOutfitTagKey(row.ConsumerId)
+//	key := SavedOutfitTagKey(row.ConsumerId)
 func tagExpansion(e *dsl.Entity, tag string, fields []string) (params, body string) {
 	pieces := splitTagTemplate(tag)
 
@@ -420,4 +420,3 @@ var goReservedWords = map[string]bool{
 	"type":        true,
 	"var":         true,
 }
-

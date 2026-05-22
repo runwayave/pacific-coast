@@ -61,6 +61,28 @@ entity Account in consumer {
 	}
 }
 
+func TestIR_BackfillModifier(t *testing.T) {
+	ir := mustLower(t, `
+entity User in consumer {
+  id           bigint primary
+  first_name   text not null
+  last_name    text not null
+  display_name text not null backfill "first_name || ' ' || last_name"
+}
+`)
+	dn := ir.Entities[0].FindField("display_name")
+	if dn == nil {
+		t.Fatalf("display_name not found")
+	}
+	want := `first_name || ' ' || last_name`
+	if dn.Backfill != want {
+		t.Errorf("backfill: got %q want %q", dn.Backfill, want)
+	}
+	if !dn.NotNull {
+		t.Errorf("not_null modifier should still apply")
+	}
+}
+
 func TestIR_PrimaryImpliesNotNull(t *testing.T) {
 	ir := mustLower(t, `entity A in x { id bigint primary }`)
 	pf := ir.Entities[0].PrimaryField()

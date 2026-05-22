@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/rachitkumar205/atlantis/internal/obs"
 )
 
 // VersionSetter is the slice of the memcached client the worker needs.
@@ -72,6 +75,11 @@ type WorkerConfig struct {
 	// Default 100ms.
 	BumpDebounce time.Duration
 
+	// MaxAttempts caps per-row retries. A row that hits MaxAttempts
+	// is moved to cache_invalidations_dead so subsequent drain passes
+	// don't keep claiming it. Default 100.
+	MaxAttempts int
+
 	// Logger receives structured events. Defaults to slog.Default.
 	Logger *slog.Logger
 }
@@ -85,6 +93,7 @@ func DefaultWorkerConfig() WorkerConfig {
 		PointerTTL:    24 * time.Hour,
 		AlertLag:      5 * time.Minute,
 		BumpDebounce:  100 * time.Millisecond,
+		MaxAttempts:   100,
 	}
 }
 
@@ -115,8 +124,13 @@ type Worker struct {
 	bumpMu   sync.Mutex
 	lastBump map[string]time.Time
 
-	stopOnce sync.Once
-	stopped  chan struct{}
+	stopped chan struct{}
+
+	// lastDrainNS is the unix-nano time of the most recent successful
+	// claim from the outbox table. Read by LastDrainAt for /readyz
+	// heartbeat checks. Atomic so the readiness handler doesn't contend
+	// with the drain goroutine.
+	lastDrainNS atomic.Int64
 }
 
 // NewWorker constructs a Worker. The pool MUST be a pgxpool so we can use
@@ -149,10 +163,13 @@ func NewWorker(pool *pgxpool.Pool, mc VersionSetter, lru LRUInvalidator, qc Gene
 	if cfg.BumpDebounce == 0 {
 		cfg.BumpDebounce = 100 * time.Millisecond
 	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = 100
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Worker{
+	w := &Worker{
 		pool:     pool,
 		mc:       mc,
 		lru:      lru,
@@ -160,61 +177,35 @@ func NewWorker(pool *pgxpool.Pool, mc VersionSetter, lru LRUInvalidator, qc Gene
 		cfg:      cfg,
 		lastBump: make(map[string]time.Time),
 		stopped:  make(chan struct{}),
-	}, nil
+	}
+	// Seed the heartbeat so /readyz survives the brief gap before the
+	// first drain pass completes.
+	w.lastDrainNS.Store(time.Now().UnixNano())
+	return w, nil
 }
 
-// Run blocks until ctx is canceled. Errors during drain are logged and
-// retried; only fatal acquire / LISTEN errors propagate up.
+// Run blocks until ctx is canceled. Drain errors are logged and retried;
+// only ctx cancellation propagates up. The LISTEN session lives in its
+// own goroutine that reconnects on any failure, so a transient pg drop
+// degrades the worker to ticker-only polling instead of taking it offline.
 //
 // In production this runs in its own goroutine launched by cmd/server.
 // In tests, run it in a goroutine and cancel ctx to stop.
 func (w *Worker) Run(ctx context.Context) error {
 	defer close(w.stopped)
 
-	// Acquire a dedicated connection for LISTEN. This connection is held for
-	// the worker's lifetime; the rest of the work uses the regular pool.
-	conn, err := w.pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("worker: acquire listen conn: %w", err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "LISTEN atl_cache_invalidations"); err != nil {
-		return fmt.Errorf("worker: LISTEN: %w", err)
-	}
-
-	// Run one drain pass immediately to clear anything that landed before
-	// LISTEN was registered.
+	// First drain clears anything that landed before the LISTEN session
+	// establishes. The ticker covers steady-state polling.
 	w.drainOnce(ctx)
 
 	ticker := time.NewTicker(w.cfg.DrainInterval)
 	defer ticker.Stop()
 
-	// notifyCh is a small buffered channel fed by the LISTEN goroutine. We
-	// don't care about the payload — any notify means "wake up and drain".
 	notifyCh := make(chan struct{}, 1)
 	listenCtx, cancelListen := context.WithCancel(ctx)
 	defer cancelListen()
-	go func() {
-		for {
-			if _, err := conn.Conn().WaitForNotification(listenCtx); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return
-				}
-				w.cfg.Logger.Warn("listen: wait error", "err", err)
-				// Brief backoff to avoid spinning if the connection drops.
-				select {
-				case <-listenCtx.Done():
-					return
-				case <-time.After(time.Second):
-				}
-				continue
-			}
-			select {
-			case notifyCh <- struct{}{}:
-			default:
-			}
-		}
-	}()
+	go w.runListenLoop(listenCtx, notifyCh)
+	go w.runLagPoller(ctx, 10*time.Second)
 
 	for {
 		select {
@@ -228,8 +219,61 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// drainOnce processes up to BatchSize rows, then returns. Per-row failures
-// are logged and skipped; the row stays in the outbox for the next iter.
+// runListenLoop opens LISTEN sessions on freshly-acquired pool
+// connections, reconnecting after any session-ending error. Returns
+// only when ctx is canceled. The 1s gap between sessions absorbs
+// flapping connections without turning this into a hot loop.
+func (w *Worker) runListenLoop(ctx context.Context, notifyCh chan struct{}) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			w.cfg.Logger.Error("listen loop panic", "panic", rec)
+		}
+	}()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		err := w.runListenSession(ctx, notifyCh)
+		if ctx.Err() != nil {
+			return
+		}
+		w.cfg.Logger.Warn("listen: session ended, reconnecting", "err", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// runListenSession acquires a connection, registers LISTEN, and pushes
+// wake signals into notifyCh until the session dies. The returned error
+// is whatever WaitForNotification surfaced; runListenLoop re-checks ctx
+// separately to distinguish shutdown from a real connection drop.
+func (w *Worker) runListenSession(ctx context.Context, notifyCh chan struct{}) error {
+	conn, err := w.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "LISTEN atl_cache_invalidations"); err != nil {
+		return fmt.Errorf("LISTEN: %w", err)
+	}
+	for {
+		if _, err := conn.Conn().WaitForNotification(ctx); err != nil {
+			return err
+		}
+		select {
+		case notifyCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// drainOnce processes up to BatchSize rows and returns the count
+// claimed. Per-row failures are logged and skipped; the row stays in
+// the outbox for the next iter. Drain reads the count to know when
+// the table is empty.
 //
 // Concurrency invariant: claim + apply + delete are wrapped in
 // a single Postgres transaction. `SELECT ... FOR UPDATE SKIP LOCKED` holds
@@ -250,45 +294,127 @@ func (w *Worker) Run(ctx context.Context) error {
 //
 // So the cost is bounded and the alternative (releasing the lock then
 // racing the DELETE) is worse.
-func (w *Worker) drainOnce(ctx context.Context) {
+func (w *Worker) drainOnce(ctx context.Context) int {
 	tx, err := w.pool.Begin(ctx)
 	if err != nil {
 		w.cfg.Logger.Warn("drain: begin", "err", err)
-		return
+		return 0
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := w.claimInTx(ctx, tx)
 	if err != nil {
 		w.cfg.Logger.Warn("drain: claim", "err", err)
-		return
+		return 0
 	}
+	w.lastDrainNS.Store(time.Now().UnixNano())
 	if len(rows) == 0 {
-		return
+		return 0
 	}
 
 	for _, r := range rows {
-		if err := w.apply(ctx, r); err != nil {
-			w.cfg.Logger.Warn("drain: apply",
-				"id", r.ID, "kind", r.Kind, "entity", r.Entity, "row", r.RowID, "err", err)
-			// Mark as failure inside the tx so the attempts counter goes up
-			// even on retryable errors. The row stays — we did not DELETE.
-			w.markFailureInTx(ctx, tx, r.ID, err)
-			continue
-		}
-		// LRU drop only matters for row-level invalidations. Generation
-		// bumps invalidate the tier-2 query cache, which is not tier-0
-		// LRU's concern.
-		if w.lru != nil && (r.Kind == "" || r.Kind == "invalidation") {
-			w.lru.Invalidate(r.Entity, r.RowID)
-		}
-		if err := w.deleteInTx(ctx, tx, r.ID); err != nil {
-			w.cfg.Logger.Warn("drain: delete row", "id", r.ID, "err", err)
-		}
+		w.processRow(ctx, tx, r)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		w.cfg.Logger.Warn("drain: commit", "err", err)
 	}
+	return len(rows)
+}
+
+// Drain processes outbox rows until the table is empty or ctx expires.
+// Called during graceful shutdown after Run returns. FOR UPDATE SKIP
+// LOCKED makes it safe to call concurrently with Run, but pointless.
+func (w *Worker) Drain(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if w.drainOnce(ctx) == 0 {
+			return nil
+		}
+	}
+}
+
+// LastDrainAt returns the time of the most recent successful claim from
+// the outbox table. /readyz reads this as a worker heartbeat — a value
+// older than the configured staleness threshold means the goroutine is
+// wedged on something memcached, pg, or schedule-related.
+func (w *Worker) LastDrainAt() time.Time {
+	return time.Unix(0, w.lastDrainNS.Load())
+}
+
+// processRow handles one outbox row inside the drain tx. Wrapping apply
+// in defer-recover keeps a panic on a single poisoned row from killing
+// the worker; the panic logs, the row's attempts increment, and the
+// next row in the batch runs. Both error and panic paths route through
+// markFailureInTx, which moves attempts-exceeded rows to the dead-letter
+// table so the main outbox stays small. The single deferred metrics
+// increment covers all three exit paths (success / failure / panic).
+func (w *Worker) processRow(ctx context.Context, tx pgx.Tx, r pendingRow) {
+	kind := obs.NormalizeOutboxKind(r.Kind)
+	result := "success"
+	defer func() {
+		if rec := recover(); rec != nil {
+			result = "panic"
+			obs.OutboxProcessed.WithLabelValues(kind, result).Inc()
+			w.cfg.Logger.Error("drain: row panic",
+				"id", r.ID, "kind", r.Kind, "entity", r.Entity, "row", r.RowID, "panic", rec)
+			w.markFailureInTx(ctx, tx, r, fmt.Errorf("panic: %v", rec))
+			return
+		}
+		obs.OutboxProcessed.WithLabelValues(kind, result).Inc()
+	}()
+	if err := w.apply(ctx, r); err != nil {
+		result = "failure"
+		w.cfg.Logger.Warn("drain: apply",
+			"id", r.ID, "kind", r.Kind, "entity", r.Entity, "row", r.RowID, "err", err)
+		w.markFailureInTx(ctx, tx, r, err)
+		return
+	}
+	// LRU drop only matters for row-level invalidations. Generation
+	// bumps invalidate the tier-2 query cache, which is not tier-0
+	// LRU's concern.
+	if w.lru != nil && (r.Kind == "" || r.Kind == "invalidation") {
+		w.lru.Invalidate(r.Entity, r.RowID)
+	}
+	if err := w.deleteInTx(ctx, tx, r.ID); err != nil {
+		w.cfg.Logger.Warn("drain: delete row", "id", r.ID, "err", err)
+	}
+}
+
+// runLagPoller updates obs.OutboxLagSeconds on a coarse interval. The
+// query is a full-table MIN over an indexed column on a small table —
+// cheap, but not free-on-every-Prometheus-scrape, hence polling rather
+// than a GaugeFunc. interval <= 0 falls back to 10s.
+func (w *Worker) runLagPoller(ctx context.Context, interval time.Duration) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			w.cfg.Logger.Error("lag poller panic", "panic", rec)
+		}
+	}()
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			w.updateLagGauge(ctx)
+		}
+	}
+}
+
+func (w *Worker) updateLagGauge(ctx context.Context) {
+	q := fmt.Sprintf(`SELECT COALESCE(EXTRACT(EPOCH FROM (now() - MIN(enqueued_at))), 0) FROM %s.cache_invalidations`, w.cfg.Schema)
+	var lag float64
+	if err := w.pool.QueryRow(ctx, q).Scan(&lag); err != nil {
+		w.cfg.Logger.Debug("lag poll", "err", err)
+		return
+	}
+	obs.OutboxLagSeconds.Set(lag)
 }
 
 type pendingRow struct {
@@ -304,10 +430,17 @@ type pendingRow struct {
 // claimInTx pulls a batch of outbox rows inside the worker's transaction.
 // `FOR UPDATE SKIP LOCKED` holds the row lock until the surrounding tx
 // commits or rolls back — long enough for the DELETE that finishes the row.
+//
+// Rows in the per-row backoff window are skipped so a recently-failed
+// row doesn't get hammered every drain tick. Backoff is exponential in
+// attempts (base 100ms, capped at 1h); untried rows (last_error_at IS
+// NULL) are always eligible.
 func (w *Worker) claimInTx(ctx context.Context, tx pgx.Tx) ([]pendingRow, error) {
 	q := fmt.Sprintf(`
 SELECT id, kind, entity, row_id, new_version, enqueued_at, attempts
 FROM %s.cache_invalidations
+WHERE last_error_at IS NULL
+   OR now() > last_error_at + LEAST(power(2, attempts) * interval '100 milliseconds', interval '1 hour')
 ORDER BY enqueued_at
 LIMIT $1
 FOR UPDATE SKIP LOCKED`, w.cfg.Schema)
@@ -415,19 +548,49 @@ func (w *Worker) applyGenerationBump(ctx context.Context, r pendingRow) error {
 	return nil
 }
 
-// markFailureInTx bumps attempts and records last_error. Sanitized so we
-// never persist raw error messages — those can leak hostnames, query
-// fragments, or PII. We persist only the error *kind* and a truncated
-// category.
-func (w *Worker) markFailureInTx(ctx context.Context, tx pgx.Tx, id int64, applyErr error) {
+// markFailureInTx bumps attempts and records last_error / last_error_at.
+// Sanitized so we never persist raw error messages — those can leak
+// hostnames, query fragments, or PII. We persist only the error *kind*
+// and a truncated category.
+//
+// When the next attempt count meets MaxAttempts the row moves to the
+// dead-letter table so subsequent drain passes don't keep claiming it.
+// Operators inspect cache_invalidations_dead to triage poison rows.
+func (w *Worker) markFailureInTx(ctx context.Context, tx pgx.Tx, r pendingRow, applyErr error) {
 	msg := sanitizeError(applyErr)
+	if r.Attempts+1 >= w.cfg.MaxAttempts {
+		w.moveToDLQInTx(ctx, tx, r.ID, msg)
+		return
+	}
 	q := fmt.Sprintf(`
 UPDATE %s.cache_invalidations
-SET attempts = attempts + 1, last_error = $2
+SET attempts = attempts + 1, last_error = $2, last_error_at = now()
 WHERE id = $1`, w.cfg.Schema)
-	if _, err := tx.Exec(ctx, q, id, msg); err != nil {
-		w.cfg.Logger.Warn("mark failure", "id", id, "err", err)
+	if _, err := tx.Exec(ctx, q, r.ID, msg); err != nil {
+		w.cfg.Logger.Warn("mark failure", "id", r.ID, "err", err)
 	}
+}
+
+// moveToDLQInTx atomically moves a poisoned outbox row to the dead-letter
+// table inside the surrounding worker tx. The CTE-DELETE returns the
+// original row; the INSERT preserves the original id, entity, etc.,
+// bumps attempts to reflect this final try, and stamps the sanitized
+// failure reason.
+func (w *Worker) moveToDLQInTx(ctx context.Context, tx pgx.Tx, id int64, sanitizedErr string) {
+	q := fmt.Sprintf(`
+WITH moved AS (
+    DELETE FROM %s.cache_invalidations WHERE id = $1 RETURNING *
+)
+INSERT INTO %s.cache_invalidations_dead
+    (id, entity, row_id, new_version, kind, enqueued_at, attempts, last_error, last_error_at)
+SELECT id, entity, row_id, new_version, kind, enqueued_at, attempts + 1, $2, now()
+FROM moved`, w.cfg.Schema, w.cfg.Schema)
+	if _, err := tx.Exec(ctx, q, id, sanitizedErr); err != nil {
+		w.cfg.Logger.Error("dlq move failed", "id", id, "err", err)
+		return
+	}
+	obs.OutboxDLQ.Inc()
+	w.cfg.Logger.Warn("moved to dlq", "id", id, "err", sanitizedErr)
 }
 
 // deleteInTx removes a successfully-applied outbox row, inside the worker tx.

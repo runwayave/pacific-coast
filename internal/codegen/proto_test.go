@@ -275,10 +275,10 @@ func TestProto_PKWithCustomTypeAndName(t *testing.T) {
 
 func TestProto_SnakeToCamel(t *testing.T) {
 	cases := map[string]string{
-		"id":            "Id",
-		"item_vec":      "ItemVec",
-		"a_b_c":         "ABC",
-		"single":        "Single",
+		"id":           "Id",
+		"item_vec":     "ItemVec",
+		"a_b_c":        "ABC",
+		"single":       "Single",
 		"already_done": "AlreadyDone",
 	}
 	for in, want := range cases {

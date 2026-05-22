@@ -22,17 +22,27 @@ linters:
     - errcheck
     - unused
     - ineffassign
+  settings:
+    staticcheck:
+      # Bug-class checks only. SA* is staticcheck's actual bug-finding
+      # category; ST* (stylecheck), S* (simple/refactor), and QF*
+      # (quickfix) are all stylistic and violate the "no high-friction
+      # noise" philosophy at the top of this file.
+      checks:
+        - "-all"
+        - "SA*"
+  exclusions:
+    rules:
+      # Generated code: the codegen knows what it's emitting. Squelch lint
+      # noise on the gen/ tree so a regen doesn't fail CI cosmetically.
+      - path: gen/
+        linters:
+          - errcheck
+          - staticcheck
 
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # Generated code: the codegen knows what it's emitting. Squelch lint
-    # noise on the gen/ tree so a regen doesn't fail CI cosmetically.
-    - path: gen/
-      linters:
-        - errcheck
-        - staticcheck
 
 formatters:
   enable:

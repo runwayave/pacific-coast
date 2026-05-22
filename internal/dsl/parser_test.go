@@ -459,7 +459,7 @@ query OutfitsForConsumer for SavedOutfit {
 
 // TestParse_QueryDecl_RawSQLPreservesSpecialChars confirms the lexer's
 // raw-mode capture leaves the body byte-identical. The body contains
-// SQL single-quoted strings (with embedded escape `''`), SQL line
+// SQL single-quoted strings (with embedded escape `”`), SQL line
 // comments (`-- comment`), and a `*` — chars the regular DSL lexer
 // would otherwise choke on. This is the load-bearing invariant that
 // lets pg_query_go see the source as PG itself would.

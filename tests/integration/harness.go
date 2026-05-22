@@ -158,6 +158,11 @@ func NewHarness(t *testing.T) *Harness {
 	return h
 }
 
+// PgxPool exposes the raw pgxpool so sub-package tests (e.g.,
+// tests/integration/backfill) can construct workers that take the
+// concrete pool type without reaching for an internal accessor.
+func (h *Harness) PgxPool() *pgxpool.Pool { return h.pgxPool }
+
 // WaitForInvalidations blocks until the outbox is empty, up to the timeout.
 // Tests call this after a write to ensure the post-commit invalidation
 // has actually landed in memcached before asserting a cache miss/hit.

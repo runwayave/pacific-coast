@@ -121,7 +121,7 @@ func ProtoType(t dsl.FieldType) (string, error) {
 //   - decl:   `var <local> <go-scan-type>` — the rows.Scan target.
 //   - target: `&<local>` — passed into rows.Scan's variadic args.
 //   - assign: copies <local> into <protoField>, folding in any
-//             nullable→pointer or pgvector→[]float32 conversion.
+//     nullable→pointer or pgvector→[]float32 conversion.
 //
 // Mirror of BindExpr in the opposite direction.
 func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (decl, target, assign string) {

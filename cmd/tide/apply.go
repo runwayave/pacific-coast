@@ -37,6 +37,42 @@ type planResponse struct {
 	ImpactReport   []impactEntry `json:"ImpactReport"`
 	ParseErrors    []string      `json:"ParseErrors"`
 	BreakingDetail []string      `json:"BreakingDetail"`
+
+	// Phase-split scripts + field driver list. Populated when the plan
+	// contains a backfill-required change with a declared `backfill`
+	// modifier; consumed by `tide apply --backfill` to drive BeginBackfillPlan.
+	PreBackfillUpSQL       string             `json:"PreBackfillUpSQL,omitempty"`
+	PreBackfillIndexesSQL  string             `json:"PreBackfillIndexesSQL,omitempty"`
+	PostBackfillUpSQL      string             `json:"PostBackfillUpSQL,omitempty"`
+	PostBackfillIndexesSQL string             `json:"PostBackfillIndexesSQL,omitempty"`
+	BackfillFields         []backfillFieldRef `json:"BackfillFields,omitempty"`
+}
+
+type backfillFieldRef struct {
+	EntityID   string `json:"EntityID"`
+	Field      string `json:"Field"`
+	Expression string `json:"Expression"`
+	PKColumn   string `json:"PKColumn"`
+	TableName  string `json:"TableName"`
+}
+
+type beginBackfillRequest struct {
+	Caller                 string             `json:"Caller"`
+	PlanID                 string             `json:"PlanID"`
+	Files                  []SubmittedFile    `json:"Files"`
+	PreBackfillUpSQL       string             `json:"PreBackfillUpSQL"`
+	PreBackfillIndexesSQL  string             `json:"PreBackfillIndexesSQL"`
+	PostBackfillUpSQL      string             `json:"PostBackfillUpSQL"`
+	PostBackfillIndexesSQL string             `json:"PostBackfillIndexesSQL"`
+	BackfillFields         []backfillFieldRef `json:"BackfillFields"`
+}
+
+type beginBackfillResponse struct {
+	PlanHash        string `json:"PlanHash"`
+	Accepted        bool   `json:"Accepted"`
+	AlreadyRunning  bool   `json:"AlreadyRunning"`
+	AlreadyComplete bool   `json:"AlreadyComplete"`
+	Message         string `json:"Message"`
 }
 
 type applyRequest struct {
@@ -51,17 +87,18 @@ type applyResponse struct {
 }
 
 // Exit codes:
-//   0 — plan applied (or dry-run / no changes).
-//   1 — backfill required.
-//   2 — breaking changes; need a atlantis PR.
-//   3 — operational error (parse error, network failure, etc).
+//
+//	0 — plan applied (or dry-run / no changes).
+//	1 — backfill required.
+//	2 — breaking changes; need a atlantis PR.
+//	3 — operational error (parse error, network failure, etc).
 //
 // cmdApply is the main user touchpoint for tide apply.
 func cmdApply(args []string) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
-	backfill := fs.String("backfill", "", "Backfill SQL file (required for backfill_required plans)")
+	backfill := fs.Bool("backfill", false, "Kick off the declarative backfill flow for a backfill_required plan (calls BeginBackfillPlan; monitor with `tide backfill status`)")
 	dryRun := fs.Bool("dry-run", false, "Plan only; do not apply")
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
 	noPull := fs.Bool("no-pull", false, "Skip the pre-apply `tide pull` refresh of .tide-cache/")
@@ -102,7 +139,7 @@ func cmdApply(args []string) int {
 		fmt.Fprintln(os.Stderr, "tide:", err)
 		return 3
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var planResp planResponse
 	err = client.invoke(ctx, "/atlantis.admin.v1.Admin/PlanSchema",
@@ -140,18 +177,21 @@ func cmdApply(args []string) int {
 		return doApply(ctx, client, cfg, planResp, files)
 
 	case "backfill_required":
-		if *backfill == "" {
+		if !*backfill {
 			fmt.Fprintln(os.Stderr, "tide: this change is backfill-required.")
-			fmt.Fprintln(os.Stderr, "    Write the backfill SQL and re-run with --backfill <file>.")
+			if len(planResp.BackfillFields) > 0 {
+				fmt.Fprintln(os.Stderr, "    Declared backfills:")
+				for _, f := range planResp.BackfillFields {
+					fmt.Fprintf(os.Stderr, "      %s.%s ← %s\n", f.EntityID, f.Field, f.Expression)
+				}
+				fmt.Fprintln(os.Stderr, "    Re-run with --backfill to kick off the chunked backfill.")
+			} else {
+				fmt.Fprintln(os.Stderr, "    No `backfill \"<expr>\"` modifiers declared on the relevant fields —")
+				fmt.Fprintln(os.Stderr, "    add one in your .atl files and re-plan, or apply the backfill out of band.")
+			}
 			return 1
 		}
-		// The server applies a single .up.sql; the backfill is not woven
-		// into the migration. We surface a clear error so the operator
-		// runs it manually.
-		fmt.Fprintln(os.Stderr, "tide: --backfill is accepted but the v0.1 server")
-		fmt.Fprintln(os.Stderr, "    does not yet splice backfill SQL into the migration.")
-		fmt.Fprintln(os.Stderr, "    Apply your backfill SQL manually, then re-run tide apply.")
-		return 1
+		return doBeginBackfill(ctx, client, cfg, planResp, files)
 
 	case "cross_caller_breaking":
 		fmt.Fprintln(os.Stderr, "tide: this change is breaking other callers:")
@@ -164,6 +204,54 @@ func cmdApply(args []string) int {
 
 	default:
 		fmt.Fprintf(os.Stderr, "tide: unknown plan class %q\n", planResp.Class)
+		return 3
+	}
+}
+
+// doBeginBackfill submits the phase-split scripts + field driver list to
+// the server's BeginBackfillPlan RPC. The server runs Phase 1 inline
+// (additive parts + nullable ADD COLUMN), records the backfill_plan +
+// backfill_field_state rows, and returns immediately. The background
+// worker picks up the field rows and runs the chunked UPDATE loop;
+// operators monitor with `tide backfill status`.
+func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, plan planResponse, files []SubmittedFile) int {
+	if len(plan.BackfillFields) == 0 {
+		fmt.Fprintln(os.Stderr, "tide: --backfill set but no fields declare `backfill \"<expr>\"`.")
+		fmt.Fprintln(os.Stderr, "    Add the modifier in your .atl files (see docs), re-plan, then re-run.")
+		return 1
+	}
+	req := beginBackfillRequest{
+		Caller:                 cfg.Caller,
+		PlanID:                 plan.PlanID,
+		Files:                  files,
+		PreBackfillUpSQL:       plan.PreBackfillUpSQL,
+		PreBackfillIndexesSQL:  plan.PreBackfillIndexesSQL,
+		PostBackfillUpSQL:      plan.PostBackfillUpSQL,
+		PostBackfillIndexesSQL: plan.PostBackfillIndexesSQL,
+		BackfillFields:         plan.BackfillFields,
+	}
+	var resp beginBackfillResponse
+	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/BeginBackfillPlan", req, &resp); err != nil {
+		fmt.Fprintln(os.Stderr, "tide backfill:", err)
+		return 3
+	}
+	switch {
+	case resp.AlreadyComplete:
+		fmt.Printf("tide: backfill already complete (plan-hash=%s)\n", resp.PlanHash)
+		return 0
+	case resp.AlreadyRunning:
+		fmt.Printf("tide: backfill already in flight (plan-hash=%s)\n", resp.PlanHash)
+		fmt.Printf("      monitor with: tide backfill status %s\n", resp.PlanHash)
+		return 0
+	case resp.Accepted:
+		fmt.Printf("tide: ✓ backfill accepted (plan-hash=%s)\n", resp.PlanHash)
+		if resp.Message != "" {
+			fmt.Printf("      %s\n", resp.Message)
+		}
+		fmt.Printf("      monitor with: tide backfill status %s\n", resp.PlanHash)
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "tide backfill: unexpected response: %+v\n", resp)
 		return 3
 	}
 }

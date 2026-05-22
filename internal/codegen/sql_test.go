@@ -347,12 +347,12 @@ func TestEmit_TopoSort_SelfReferenceOK(t *testing.T) {
 
 func TestSnakeCase(t *testing.T) {
 	cases := map[string]string{
-		"Account":      "account",
-		"SavedOutfit":  "saved_outfit",
-		"OAuthToken":   "o_auth_token",
-		"APIKey":       "api_key",
-		"ProductV2":    "product_v2",
-		"id":           "id",
+		"Account":       "account",
+		"SavedOutfit":   "saved_outfit",
+		"OAuthToken":    "o_auth_token",
+		"APIKey":        "api_key",
+		"ProductV2":     "product_v2",
+		"id":            "id",
 		"already_snake": "already_snake",
 	}
 	for in, want := range cases {

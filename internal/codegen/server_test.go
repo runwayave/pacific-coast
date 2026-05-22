@@ -264,10 +264,10 @@ func TestEmitGoServer_ScanIntoNullableFields(t *testing.T) {
 	files, _ := EmitGoServer(ir)
 	c := entityServerFile(t, files)
 	for _, sub := range []string{
-		"var emailLocal string",                                // not null → bare string
-		"var aliasLocal sql.NullString",                         // nullable → NullString
-		"var ageLocal sql.NullInt32",                            // nullable int → NullInt32
-		"out.Alias = runtime.StringPtrFromNull(aliasLocal)",     // post-assign via helper
+		"var emailLocal string",                             // not null → bare string
+		"var aliasLocal sql.NullString",                     // nullable → NullString
+		"var ageLocal sql.NullInt32",                        // nullable int → NullInt32
+		"out.Alias = runtime.StringPtrFromNull(aliasLocal)", // post-assign via helper
 		"out.Age = runtime.Int32PtrFromNull(ageLocal)",
 	} {
 		assertContains(t, c, sub)

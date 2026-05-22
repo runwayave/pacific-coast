@@ -1,12 +1,13 @@
 // pc — caller-side CLI invoked from inside backend / vendor-platform repos.
 //
 //	tide apply [--no-pull]                     submit + apply this repo's .atl files
-//	tide apply --backfill backfill.sql
+//	tide apply --backfill                      kick off declarative backfill for a backfill_required plan
 //	tide apply --dry-run
 //	tide plan  [--against URL] [--format FMT]   dry-run plan against a server; no mutation
 //	tide pull  [--force]                        refresh .tide-cache from server
 //	tide list                                   print every entity in the merged schema
 //	tide show  <path-substring>                 print one .atl file from the merged schema
+//	tide backfill status [plan-hash]            monitor a backfill kicked off by `tide apply --backfill`
 //	tide version
 //
 // Reads tide.yaml from cwd to discover schema paths + the atlantis
@@ -16,7 +17,7 @@
 //   - additive               → ApplyMigration, regenerate local client
 //   - backfill_required      → print expected backfill, exit 1
 //   - cross_caller_breaking  → print impact report, exit 2 (CLI hints
-//                              that a PR in atlantis is required)
+//     that a PR in atlantis is required)
 //
 // `tide apply` auto-runs `tide pull` first so cross-caller references resolve
 // against the freshest merged schema. Suppress with --no-pull when the
@@ -51,6 +52,8 @@ func main() {
 		os.Exit(cmdList(os.Args[2:]))
 	case "show":
 		os.Exit(cmdShow(os.Args[2:]))
+	case "backfill":
+		os.Exit(cmdBackfill(os.Args[2:]))
 	case "version":
 		fmt.Println("tide", version)
 	default:
@@ -61,11 +64,12 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: tide apply  [--backfill FILE] [--dry-run] [--no-pull]")
-	fmt.Fprintln(os.Stderr, "       tide plan   [--against URL] [--format table|json] [--no-pull]")
-	fmt.Fprintln(os.Stderr, "       tide pull   [--force]")
+	fmt.Fprintln(os.Stderr, "usage: tide apply    [--backfill] [--dry-run] [--no-pull]")
+	fmt.Fprintln(os.Stderr, "       tide plan     [--against URL] [--format table|json] [--no-pull]")
+	fmt.Fprintln(os.Stderr, "       tide pull     [--force]")
 	fmt.Fprintln(os.Stderr, "       tide list")
-	fmt.Fprintln(os.Stderr, "       tide show   <path-substring>")
+	fmt.Fprintln(os.Stderr, "       tide show     <path-substring>")
+	fmt.Fprintln(os.Stderr, "       tide backfill status [plan-hash]")
 	fmt.Fprintln(os.Stderr, "       tide version")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Reads ./tide.yaml for schema paths and atlantis endpoint.")

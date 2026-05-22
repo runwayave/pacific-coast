@@ -49,7 +49,7 @@ func TestTTLToExpiration(t *testing.T) {
 }
 
 func TestInt64RoundTrip(t *testing.T) {
-	cases := []int64{0, 1, -1, 42, -42, 1000000, -1000000, 1<<62, -(1 << 62)}
+	cases := []int64{0, 1, -1, 42, -42, 1000000, -1000000, 1 << 62, -(1 << 62)}
 	for _, c := range cases {
 		got, err := parseInt64(formatInt64(c))
 		if err != nil {

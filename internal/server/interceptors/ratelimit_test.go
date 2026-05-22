@@ -74,16 +74,16 @@ func TestTokenBucket_GoroutineSafe(t *testing.T) {
 
 func TestIsLowPriority(t *testing.T) {
 	cases := []struct {
-		method   string
-		wantLow  bool
+		method  string
+		wantLow bool
 	}{
 		{"/atlantis.v1.account.Account/Get", false},
 		{"/atlantis.v1.account.Account/List", true},
 		{"/atlantis.v1.account.Account/Create", false},
 		{"/atlantis.v1.product.ProductVariant/SearchBySearchVec", true},
 		{"/atlantis.v1.account.Account/BatchGet", false},
-		{"", false},                       // no slash
-		{"/no-slash-suffix/", false},      // trailing slash
+		{"", false},                  // no slash
+		{"/no-slash-suffix/", false}, // trailing slash
 	}
 	for _, c := range cases {
 		if got := isLowPriority(c.method); got != c.wantLow {

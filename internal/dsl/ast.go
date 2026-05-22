@@ -26,7 +26,7 @@ type EntityDecl struct {
 	Members   []EntityMember
 }
 
-func (*EntityDecl) isDecl()           {}
+func (*EntityDecl) isDecl()              {}
 func (e *EntityDecl) Position() Position { return e.Pos }
 func (e *EntityDecl) DeclName() string   { return e.Name }
 
@@ -94,6 +94,7 @@ const (
 	ModNotNull
 	ModUnique
 	ModCheck
+	ModBackfill
 	ModDefault
 	ModReferences
 )
@@ -108,18 +109,18 @@ type FieldModifier interface {
 // ModPrimaryDecl marks a column as the entity's PRIMARY KEY.
 type ModPrimaryDecl struct{ Pos Position }
 
-func (*ModPrimaryDecl) isFieldModifier()      {}
+func (*ModPrimaryDecl) isFieldModifier()           {}
 func (*ModPrimaryDecl) ModifierKind() ModifierKind { return ModPrimary }
-func (m *ModPrimaryDecl) Position() Position        { return m.Pos }
+func (m *ModPrimaryDecl) Position() Position       { return m.Pos }
 
 // ModIdentityDecl marks a column GENERATED ALWAYS AS IDENTITY. The codegen
 // excludes such columns from server-emitted INSERTs because Postgres
 // supplies the value.
 type ModIdentityDecl struct{ Pos Position }
 
-func (*ModIdentityDecl) isFieldModifier()             {}
-func (*ModIdentityDecl) ModifierKind() ModifierKind   { return ModIdentity }
-func (m *ModIdentityDecl) Position() Position         { return m.Pos }
+func (*ModIdentityDecl) isFieldModifier()           {}
+func (*ModIdentityDecl) ModifierKind() ModifierKind { return ModIdentity }
+func (m *ModIdentityDecl) Position() Position       { return m.Pos }
 
 // ModSerialDecl marks a column as BIGSERIAL (legacy auto-increment). Like
 // Identity, it's excluded from server-emitted INSERTs; unlike Identity, the
@@ -128,9 +129,9 @@ func (m *ModIdentityDecl) Position() Position         { return m.Pos }
 // the IR validator enforces this.
 type ModSerialDecl struct{ Pos Position }
 
-func (*ModSerialDecl) isFieldModifier()             {}
-func (*ModSerialDecl) ModifierKind() ModifierKind   { return ModSerial }
-func (m *ModSerialDecl) Position() Position         { return m.Pos }
+func (*ModSerialDecl) isFieldModifier()           {}
+func (*ModSerialDecl) ModifierKind() ModifierKind { return ModSerial }
+func (m *ModSerialDecl) Position() Position       { return m.Pos }
 
 // ModCheckDecl carries the body of a CHECK constraint (the SQL inside the
 // parens). The expression is passed through verbatim — Postgres parses it.
@@ -139,23 +140,37 @@ type ModCheckDecl struct {
 	Expr string
 }
 
-func (*ModCheckDecl) isFieldModifier()             {}
-func (*ModCheckDecl) ModifierKind() ModifierKind   { return ModCheck }
-func (m *ModCheckDecl) Position() Position         { return m.Pos }
+func (*ModCheckDecl) isFieldModifier()           {}
+func (*ModCheckDecl) ModifierKind() ModifierKind { return ModCheck }
+func (m *ModCheckDecl) Position() Position       { return m.Pos }
+
+// ModBackfillDecl carries the SQL expression that `tide apply --backfill`
+// splices into a chunked UPDATE to populate this column on existing rows.
+// The expression is parsed and purity-checked (no subqueries, no
+// non-whitelisted functions, refs must be entity columns) by
+// sqlvalidate.ValidateBackfillExpression; the raw string lives here.
+type ModBackfillDecl struct {
+	Pos  Position
+	Expr string
+}
+
+func (*ModBackfillDecl) isFieldModifier()           {}
+func (*ModBackfillDecl) ModifierKind() ModifierKind { return ModBackfill }
+func (m *ModBackfillDecl) Position() Position       { return m.Pos }
 
 // ModNotNullDecl marks a column NOT NULL.
 type ModNotNullDecl struct{ Pos Position }
 
-func (*ModNotNullDecl) isFieldModifier()      {}
+func (*ModNotNullDecl) isFieldModifier()           {}
 func (*ModNotNullDecl) ModifierKind() ModifierKind { return ModNotNull }
-func (m *ModNotNullDecl) Position() Position        { return m.Pos }
+func (m *ModNotNullDecl) Position() Position       { return m.Pos }
 
 // ModUniqueDecl marks a column UNIQUE.
 type ModUniqueDecl struct{ Pos Position }
 
-func (*ModUniqueDecl) isFieldModifier()      {}
+func (*ModUniqueDecl) isFieldModifier()           {}
 func (*ModUniqueDecl) ModifierKind() ModifierKind { return ModUnique }
-func (m *ModUniqueDecl) Position() Position        { return m.Pos }
+func (m *ModUniqueDecl) Position() Position       { return m.Pos }
 
 // ModDefaultDecl: `default <value>`. Value is held loosely so the IR lowering
 // can apply the right kind of quoting / generation.
@@ -164,17 +179,17 @@ type ModDefaultDecl struct {
 	Value DefaultValue
 }
 
-func (*ModDefaultDecl) isFieldModifier()      {}
+func (*ModDefaultDecl) isFieldModifier()           {}
 func (*ModDefaultDecl) ModifierKind() ModifierKind { return ModDefault }
-func (m *ModDefaultDecl) Position() Position        { return m.Pos }
+func (m *ModDefaultDecl) Position() Position       { return m.Pos }
 
 // DefaultValue is one of: string, integer, boolean, or now().
 type DefaultValue struct {
-	Pos    Position
-	Kind   DefaultKind
-	Str    string
-	Int    int64
-	Bool   bool
+	Pos  Position
+	Kind DefaultKind
+	Str  string
+	Int  int64
+	Bool bool
 }
 
 // DefaultKind enumerates the variants a DefaultValue can take.
@@ -190,17 +205,17 @@ const (
 
 // ModReferencesDecl: `references ns.Entity.field [on delete X] [on update Y]`.
 type ModReferencesDecl struct {
-	Pos           Position
-	TargetNS      string
-	TargetEntity  string
-	TargetField   string
-	OnDelete      RefAction // RefActionUnset if not specified
-	OnUpdate      RefAction
+	Pos          Position
+	TargetNS     string
+	TargetEntity string
+	TargetField  string
+	OnDelete     RefAction // RefActionUnset if not specified
+	OnUpdate     RefAction
 }
 
-func (*ModReferencesDecl) isFieldModifier()      {}
+func (*ModReferencesDecl) isFieldModifier()           {}
 func (*ModReferencesDecl) ModifierKind() ModifierKind { return ModReferences }
-func (m *ModReferencesDecl) Position() Position        { return m.Pos }
+func (m *ModReferencesDecl) Position() Position       { return m.Pos }
 
 // RefAction is the ON DELETE / ON UPDATE action on a foreign key.
 type RefAction int
@@ -228,11 +243,11 @@ func (a RefAction) String() string {
 
 // RelationDecl: `has_many name: Entity via field`.
 type RelationDecl struct {
-	Pos      Position
-	Kind     RelationKind
-	Name     string // local alias for the relation, e.g. "items"
-	Target   string // target entity name
-	Via      string // FK field on the target
+	Pos    Position
+	Kind   RelationKind
+	Name   string // local alias for the relation, e.g. "items"
+	Target string // target entity name
+	Via    string // FK field on the target
 }
 
 func (*RelationDecl) isEntityMember()      {}
@@ -259,8 +274,8 @@ type IndexDecl struct {
 	Where *PartialPredicate
 
 	// For hnsw / gin:
-	Field   string
-	VecOps  VectorOps // only for hnsw
+	Field  string
+	VecOps VectorOps // only for hnsw
 }
 
 func (*IndexDecl) isEntityMember()      {}
@@ -277,8 +292,9 @@ const (
 )
 
 // IndexField is one entry in a btree / partial index field list. Two forms:
-//   bare column     → Name set, IsExpr false
-//   raw expression  → Expr set, IsExpr true.  e.g. expr "lower(email)"
+//
+//	bare column     → Name set, IsExpr false
+//	raw expression  → Expr set, IsExpr true.  e.g. expr "lower(email)"
 type IndexField struct {
 	Name   string
 	Expr   string
@@ -328,12 +344,12 @@ type PartialPredicate struct {
 
 // CacheBlock holds the cache { ... } stanza.
 type CacheBlock struct {
-	Pos          Position
+	Pos            Position
 	HasReadThrough bool
-	TTL          string // raw duration string, e.g. "10m"
-	Tag          string // optional tag template, e.g. "consumer:{consumer_id}"
-	Invalidate   []InvalidateClause
-	Consistency  Consistency
+	TTL            string // raw duration string, e.g. "10m"
+	Tag            string // optional tag template, e.g. "consumer:{consumer_id}"
+	Invalidate     []InvalidateClause
+	Consistency    Consistency
 }
 
 func (*CacheBlock) isEntityMember()      {}
@@ -351,8 +367,8 @@ const (
 // InvalidateClause is one `write(target ...)` entry inside invalidate_on.
 type InvalidateClause struct {
 	Pos    Position
-	Self   bool   // true for `write(self)`
-	Target string // entity name, when Self == false
+	Self   bool             // true for `write(self)`
+	Target string           // entity name, when Self == false
 	Where  *InvalidateWhere // optional `where field = self.field`
 }
 
@@ -473,13 +489,13 @@ func (p *PartitionByDecl) Position() Position { return p.Pos }
 // (the query returns rows of the target entity) or an explicit column
 // list when the query joins or aggregates beyond the entity's shape.
 type QueryDecl struct {
-	Pos      Position
-	Name     string
-	Target   EntityRef // `for <Entity>` — the primary entity the query reads
-	Inputs   []InputParam
-	Output   *QueryOutput
-	SQL      *SQLBlock
-	Cache    *CacheBlock // optional override of the default 30s TTL
+	Pos    Position
+	Name   string
+	Target EntityRef // `for <Entity>` — the primary entity the query reads
+	Inputs []InputParam
+	Output *QueryOutput
+	SQL    *SQLBlock
+	Cache  *CacheBlock // optional override of the default 30s TTL
 }
 
 func (*QueryDecl) isDecl()              {}
@@ -564,11 +580,11 @@ type ProcedureStep struct {
 // sqlDelete / sqlInsert paths at codegen time, so typed steps inherit
 // every cache + outbox invariant the entity already enforces.
 type TypedStep struct {
-	Pos        Position
-	Verb       string // "update", "delete", or "insert"
-	Target     EntityRef
-	Assigns    []SetAssignment // populated for update/insert
-	WhereExpr  Expr            // populated for update/delete; nil for insert
+	Pos       Position
+	Verb      string // "update", "delete", or "insert"
+	Target    EntityRef
+	Assigns   []SetAssignment // populated for update/insert
+	WhereExpr Expr            // populated for update/delete; nil for insert
 }
 
 // SetAssignment: one entry in an UPDATE's SET list or an INSERT's

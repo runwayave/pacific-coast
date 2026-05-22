@@ -52,7 +52,7 @@ func (p *Pool) SendBatch(ctx context.Context, b *Batch) error {
 		return nil
 	}
 	res := p.pool.SendBatch(ctx, b.inner)
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 	for range b.Len() {
 		if _, err := res.Exec(); err != nil {
 			return fmt.Errorf("batch statement: %w", err)

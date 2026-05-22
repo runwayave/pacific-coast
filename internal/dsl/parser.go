@@ -419,6 +419,10 @@ func (p *Parser) parseFieldModifiers() []FieldModifier {
 			p.advance()
 			expr := p.expect(TokString)
 			mods = append(mods, &ModCheckDecl{Pos: t.Pos, Expr: expr.Value})
+		case TokBackfill:
+			p.advance()
+			expr := p.expect(TokString)
+			mods = append(mods, &ModBackfillDecl{Pos: t.Pos, Expr: expr.Value})
 		case TokDefault:
 			p.advance()
 			val := p.parseDefaultValue(t.Pos)
@@ -1013,9 +1017,9 @@ func (p *Parser) parseAssignment() SetAssignment {
 
 // parseExpr parses a typed-step expression. The grammar is small:
 //
-//   Expr      := Cmp ( "and" Cmp )*
-//   Cmp       := Atom ( ("=" | "!=" | "<" | "<=" | ">" | ">=") Atom )?
-//   Atom      := ArgRef | Literal | FieldRef | "now" "(" ")"
+//	Expr      := Cmp ( "and" Cmp )*
+//	Cmp       := Atom ( ("=" | "!=" | "<" | "<=" | ">" | ">=") Atom )?
+//	Atom      := ArgRef | Literal | FieldRef | "now" "(" ")"
 //
 // `and` reuses the existing TokIdent lexing — we don't have an AND
 // token because the entity DSL never needed one. Comparisons are

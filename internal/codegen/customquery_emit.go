@@ -153,13 +153,6 @@ func namespaceFromID(id string) string {
 	return ""
 }
 
-func entityNameFromID(id string) string {
-	if i := strings.IndexByte(id, '.'); i >= 0 {
-		return id[i+1:]
-	}
-	return id
-}
-
 func sortedKeys(m map[string]*customGroup) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

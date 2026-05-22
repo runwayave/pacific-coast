@@ -202,9 +202,9 @@ func TestCache_BumpGeneration_IncrementsAtomically(t *testing.T) {
 func TestCache_Generation_PerEntityIsolated(t *testing.T) {
 	c := New(newFakeMC())
 	ctx := context.Background()
-	c.BumpGeneration(ctx, "consumer.Account")
-	c.BumpGeneration(ctx, "consumer.Account")
-	c.BumpGeneration(ctx, "vendor.Product")
+	_, _ = c.BumpGeneration(ctx, "consumer.Account")
+	_, _ = c.BumpGeneration(ctx, "consumer.Account")
+	_, _ = c.BumpGeneration(ctx, "vendor.Product")
 	a, _ := c.Generation(ctx, "consumer.Account")
 	p, _ := c.Generation(ctx, "vendor.Product")
 	if a != 2 {
@@ -224,10 +224,10 @@ func TestCodec_V2RoundTrips(t *testing.T) {
 		{PKs: []string{}},
 		{PKs: []string{"a"}},
 		{PKs: []string{"a", "b", "c"}},
-		{PKs: []string{"", "x"}},                          // empty pk in list
-		{PKs: []string{string(make([]byte, 128))}},        // 128-byte pk
+		{PKs: []string{"", "x"}}, // empty pk in list
+		{PKs: []string{string(make([]byte, 128))}},         // 128-byte pk
 		{PKs: []string{"a", "b"}, NextPageToken: "cur123"}, // both fields
-		{NextPageToken: "only-token"},                     // token, no rows
+		{NextPageToken: "only-token"},                      // token, no rows
 	}
 	for i, c := range cases {
 		enc, err := encodePayload(c)
