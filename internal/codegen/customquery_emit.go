@@ -398,9 +398,15 @@ func emitCustomServerForNamespace(ir *dsl.IR, ns string, g *customGroup) (GoFile
 }
 
 func emitCustomQueryHandler(b *strings.Builder, ir *dsl.IR, q *dsl.CustomQuery) error {
+	// Rewrite atlantis-flat-name table refs (`atlantis.<ns>_<entity>`)
+	// to each entity's physical table name when a `table "..."` override
+	// is in play. No-op for schemas without overrides. Runs before param
+	// normalization so $name → $1 doesn't see rewritten table tokens
+	// halfway through.
+	sql := rewriteAtlantisTableRefs(q.SQL, ir)
 	// Rewrite the DSL SQL body so PG sees positional placeholders and
 	// the args slice is built in the right order.
-	normSQL, argOrder, err := normalizeSQLParams(q.SQL, q.Inputs)
+	normSQL, argOrder, err := normalizeSQLParams(sql, q.Inputs)
 	if err != nil {
 		return err
 	}
@@ -547,7 +553,7 @@ func emitCustomProcedureHandler(b *strings.Builder, ir *dsl.IR, p *dsl.CustomPro
 			}
 			touchedSet[step.Typed.TargetID] = true
 		case step.Raw != nil:
-			if err := emitProcedureRawStep(b, step.Raw, inputOrdinal, p.Inputs, i); err != nil {
+			if err := emitProcedureRawStep(b, ir, step.Raw, inputOrdinal, p.Inputs, i); err != nil {
 				return err
 			}
 			for _, t := range step.Raw.Touches {
@@ -717,8 +723,9 @@ func customArgBindExpr(name string, inputs []dsl.QueryParam) string {
 	return coltype.BindExpr(t, true, getter, "")
 }
 
-func emitProcedureRawStep(b *strings.Builder, raw *dsl.RawSQLIR, inputOrdinal map[string]int, inputs []dsl.QueryParam, idx int) error {
-	normSQL, argOrder, err := normalizeSQLParamsRaw(raw.SQL, inputOrdinal)
+func emitProcedureRawStep(b *strings.Builder, ir *dsl.IR, raw *dsl.RawSQLIR, inputOrdinal map[string]int, inputs []dsl.QueryParam, idx int) error {
+	sql := rewriteAtlantisTableRefs(raw.SQL, ir)
+	normSQL, argOrder, err := normalizeSQLParamsRaw(sql, inputOrdinal)
 	if err != nil {
 		return err
 	}
