@@ -130,6 +130,11 @@ const (
 
 	// TokVisibleTo gates which callers can submit a job.
 	TokVisibleTo
+
+	// TokTtlField marks an entity-level `ttl_field <col>` directive.
+	// Rows whose named column is in the past are swept by the
+	// built-in SweepExpired scheduled job.
+	TokTtlField
 )
 
 var tokenNames = map[TokenKind]string{
@@ -230,6 +235,7 @@ var tokenNames = map[TokenKind]string{
 	TokTimeout:        "timeout",
 	TokEnqueue:        "enqueue",
 	TokVisibleTo:      "visible_to",
+	TokTtlField:       "ttl_field",
 }
 
 // String returns the textual form of the token kind.
@@ -321,6 +327,7 @@ var keywords = map[string]TokenKind{
 	"timeout":    TokTimeout,
 	"enqueue":    TokEnqueue,
 	"visible_to": TokVisibleTo,
+	"ttl_field":  TokTtlField,
 }
 
 // Position is a 1-indexed source position used for error reporting,

@@ -306,6 +306,12 @@ type Entity struct {
 	// Empty means no partition predicate is injected.
 	PartitionField string `json:"partition_field,omitempty"`
 
+	// TtlField is the timestamptz column that anchors row-level expiry.
+	// When non-empty, the built-in SweepExpired scheduled job DELETEs
+	// rows where `<TtlField> < now()` on a 1-minute cron. Empty means
+	// no automatic cleanup.
+	TtlField string `json:"ttl_field,omitempty"`
+
 	// TableName overrides the physical table name codegen would otherwise
 	// compute as `atlantis.<namespace>_<snake>`. Format: `[schema.]table`,
 	// each part matching `[A-Za-z_][A-Za-z0-9_]*`. Used when adopting an
@@ -771,6 +777,8 @@ func lowerMembers(_ string, ms []EntityMember, e *Entity) []error {
 			e.TouchOnUpdateField = mm.Field
 		case *PartitionByDecl:
 			e.PartitionField = mm.Field
+		case *TtlFieldDecl:
+			e.TtlField = mm.Field
 		case *TableNameDecl:
 			e.TableName = mm.Name
 		case *CacheBlock:

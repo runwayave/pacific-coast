@@ -466,6 +466,18 @@ type PartitionByDecl struct {
 func (*PartitionByDecl) isEntityMember()      {}
 func (p *PartitionByDecl) Position() Position { return p.Pos }
 
+// TtlFieldDecl: `ttl_field <column>` — marks a timestamptz column as
+// the row-level TTL anchor. The built-in SweepExpired job periodically
+// DELETEs rows where the named column is in the past. The column must
+// be declared as `timestamptz not null` on the same entity.
+type TtlFieldDecl struct {
+	Pos   Position
+	Field string
+}
+
+func (*TtlFieldDecl) isEntityMember()      {}
+func (t *TtlFieldDecl) Position() Position { return t.Pos }
+
 // TableNameDecl: `table "<schema.table>"` — overrides the physical table
 // name codegen would otherwise compute as `atlantis.<namespace>_<snake>`.
 // Used when adopting an existing production database where the entity

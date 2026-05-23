@@ -240,6 +240,10 @@ func (p *Parser) parseEntityMembers() []EntityMember {
 			if m := p.parsePartitionByDecl(); m != nil {
 				members = append(members, m)
 			}
+		case TokTtlField:
+			kw := p.advance()
+			field := p.expect(TokIdent)
+			members = append(members, &TtlFieldDecl{Pos: kw.Pos, Field: field.Value})
 		case TokTable:
 			if m := p.parseTableNameDecl(); m != nil {
 				members = append(members, m)
