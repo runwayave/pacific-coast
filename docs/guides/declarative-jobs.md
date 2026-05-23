@@ -1,0 +1,143 @@
+# Declarative jobs
+
+After this recipe you'll have a typed background job declared in `.atl`, a Go handler registered at server startup, and a working submit-claim-complete loop running against your local atlantis.
+
+Prereqs:
+
+- atlantis running locally (`tidectl dev` or a manual `go build + exec`).
+- `ATL_JOBS_WORKER_ENABLED=true` in the server's environment.
+- `buf` and `go` (1.25+) on `$PATH`.
+
+## 1. Declare the job in `.atl`
+
+In your caller repo (e.g., `backend/internal/shopify/schema.atl`):
+
+```atl
+job ShopifyImport in vendor {
+  args {
+    vendor_id       varchar(7) not null
+    import_strategy varchar(20) not null default "skip"
+  }
+  retries  3
+  timeout  30m
+  queue    "shopify"
+}
+```
+
+- `args` uses the same type grammar as entity fields (varchar, int, jsonb, arrays, etc.).
+- `schedule "cron-spec"` adds periodic invocation if you want the job to fire on a timer.
+- `visible_to "vendor"` restricts which callers can submit.
+
+## 2. Run codegen
+
+```bash
+tidectl codegen --workspace=atlantis.dev.yaml
+```
+
+This emits `gen/go/server/<ns>/jobs.go` with:
+
+- `ShopifyImportArgs` struct (typed, json-tagged).
+- `ShopifyImportHandler` interface (`Handle(ctx, args) error`).
+- `ShopifyImportJobName` const (`"vendor.ShopifyImport"`).
+- `RegisterShopifyImport(reg, handler)` helper.
+
+## 3. Implement the handler
+
+In your server code:
+
+```go
+type shopifyImportHandler struct {
+    client *shopify.Client
+}
+
+func (h *shopifyImportHandler) Handle(ctx context.Context, args vendorpkg.ShopifyImportArgs) error {
+    // Report progress for long-running imports.
+    jobs.Checkpoint(ctx, 10, "fetching catalog")
+
+    products, err := h.client.FetchProducts(ctx, args.VendorId)
+    if err != nil {
+        return err // worker retries up to max_retries, then DLQs
+    }
+
+    jobs.Checkpoint(ctx, 80, "importing products")
+    // ... import logic ...
+
+    return nil
+}
+```
+
+## 4. Register at server startup
+
+In `cmd/server/main.go` (or your fork's equivalent):
+
+```go
+reg := jobs.NewRegistry()
+vendorpkg.RegisterShopifyImport(reg, &shopifyImportHandler{client: shopifyClient})
+// pass reg to the worker pool
+```
+
+## 5. Apply the schema
+
+```bash
+tide apply
+```
+
+This writes the job's runtime config (retries, timeout, queue) to the database so `SubmitJob` can look it up at submit time.
+
+## 6. Submit a job
+
+Use the generated `Args` struct for type safety, then submit via the admin RPC:
+
+```go
+args := vendorpkg.ShopifyImportArgs{
+    VendorId:       "v123",
+    ImportStrategy: "replace",
+}
+argsJSON, _ := json.Marshal(args)
+client.SubmitJob(ctx, admin.SubmitJobRequest{
+    JobName: vendorpkg.ShopifyImportJobName,
+    Args:    argsJSON,
+})
+```
+
+Or from the CLI (operator ad-hoc):
+
+```bash
+tide job submit vendor.ShopifyImport --args='{"vendor_id":"v123","import_strategy":"replace"}'
+```
+
+## 7. Monitor
+
+```bash
+tide job status <job-id>
+tide job dead --job-name=vendor.ShopifyImport
+tide job retry <dead-job-id>
+```
+
+## Enqueue from a procedure
+
+Jobs can be enqueued atomically with a write transaction:
+
+```atl
+procedure ConfirmOrder for vendor.Order {
+  input { order_id: varchar(10) }
+  steps {
+    update Order set financial_status = "paid" where order_id = $order_id
+    enqueue vendor.ShopifyImport(vendor_id: $vendor_id, import_strategy: "skip")
+  }
+}
+```
+
+The job row shares the procedure's tx. If the procedure rolls back, the job is never enqueued.
+
+## Common errors
+
+- `unknown job "vendor.ShopifyImport"` — run `tide apply` to record the declaration into the IR checkpoint.
+- `no handler registered for vendor.ShopifyImport` — call `RegisterShopifyImport(reg, handler)` at server startup. The worker retries until a pod with the handler claims the row.
+- `caller "X" is not allowed to submit` — the job declares `visible_to "Y"`. Either submit from the right caller or update the visibility.
+
+## Related
+
+- [Jobs and workflows concept](../concepts/jobs-and-workflows.md). How the runtime works under the hood.
+- [Row-level TTL](row-ttl.md). Automatic expiry using the job runtime's built-in sweeper.
+- [Local development](local-development.md). Running atlantis locally with `tidectl dev`.
