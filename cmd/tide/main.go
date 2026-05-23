@@ -56,6 +56,8 @@ func main() {
 		os.Exit(cmdBackfill(os.Args[2:]))
 	case "job":
 		os.Exit(cmdJob(os.Args[2:]))
+	case "workflow":
+		os.Exit(cmdWorkflow(os.Args[2:]))
 	case "version":
 		fmt.Println("tide", version)
 	default:
@@ -73,6 +75,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       tide show     <path-substring>")
 	fmt.Fprintln(os.Stderr, "       tide backfill status [plan-hash]")
 	fmt.Fprintln(os.Stderr, "       tide job      submit|status|dead|retry ...")
+	fmt.Fprintln(os.Stderr, "       tide workflow start|status ...")
 	fmt.Fprintln(os.Stderr, "       tide version")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Reads ./tide.yaml for schema paths and atlantis endpoint.")
