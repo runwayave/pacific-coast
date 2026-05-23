@@ -131,9 +131,13 @@ func (p *Parser) parseFile() *File {
 			if d := p.parseJob(); d != nil {
 				f.Decls = append(f.Decls, d)
 			}
+		case TokWorkflow:
+			if d := p.parseWorkflow(); d != nil {
+				f.Decls = append(f.Decls, d)
+			}
 		default:
-			p.errf(t.Pos, "expected 'entity', 'hypertable', 'query', 'procedure', or 'job', got %s", t.Kind)
-			p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob)
+			p.errf(t.Pos, "expected 'entity', 'hypertable', 'query', 'procedure', 'job', or 'workflow', got %s", t.Kind)
+			p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow)
 		}
 	}
 }
@@ -1281,4 +1285,137 @@ func (p *Parser) parseEnqueueStep() *EnqueueStep {
 	}
 	p.expect(TokRParen)
 	return eq
+}
+
+// parseWorkflow: `workflow <Name> in <ns> { state { ... } step <name> { ... } compensate <name> { ... } }`.
+func (p *Parser) parseWorkflow() *WorkflowDecl {
+	kw := p.expect(TokWorkflow)
+	if kw.Kind == TokError {
+		p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow)
+		return nil
+	}
+	name := p.expect(TokIdent)
+	p.expect(TokIn)
+	ns := p.expect(TokIdent)
+	p.expect(TokLBrace)
+
+	wf := &WorkflowDecl{
+		Pos:       kw.Pos,
+		Name:      name.Value,
+		Namespace: ns.Value,
+	}
+
+	for {
+		t := p.peek()
+		switch t.Kind {
+		case TokRBrace, TokEOF:
+			p.expect(TokRBrace)
+			return wf
+		case TokState:
+			wf.State = append(wf.State, p.parseWorkflowState()...)
+		case TokStep:
+			wf.Steps = append(wf.Steps, p.parseWorkflowStep())
+		case TokCompensate:
+			wf.Compensations = append(wf.Compensations, p.parseWorkflowComp())
+		default:
+			p.errf(t.Pos, "expected 'state', 'step', 'compensate', or '}' in workflow body, got %s", t.Kind)
+			p.recover(TokRBrace, TokState, TokStep, TokCompensate, TokEOF)
+		}
+	}
+}
+
+// parseWorkflowState: `state { field_name type modifiers, ... }`.
+// Reuses the same field grammar as job args.
+func (p *Parser) parseWorkflowState() []*FieldDecl {
+	p.expect(TokState)
+	p.expect(TokLBrace)
+	var fields []*FieldDecl
+	for {
+		t := p.peek()
+		if t.Kind == TokRBrace || t.Kind == TokEOF {
+			p.expect(TokRBrace)
+			return fields
+		}
+		if t.Kind != TokIdent {
+			p.errf(t.Pos, "expected state field name or '}', got %s", t.Kind)
+			p.recover(TokRBrace, TokIdent, TokEOF)
+			continue
+		}
+		if f := p.parseField(); f != nil {
+			fields = append(fields, f)
+		}
+	}
+}
+
+// parseWorkflowStep: `step <name> { job <ns.Job> args { k: v, ... } }`.
+func (p *Parser) parseWorkflowStep() WorkflowStepDecl {
+	kw := p.expect(TokStep)
+	name := p.expect(TokIdent)
+	p.expect(TokLBrace)
+
+	step := WorkflowStepDecl{Pos: kw.Pos, Name: name.Value}
+	for {
+		t := p.peek()
+		switch t.Kind {
+		case TokRBrace, TokEOF:
+			p.expect(TokRBrace)
+			return step
+		case TokJob:
+			p.advance()
+			step.JobRef = p.parseEntityRef()
+		case TokArgs:
+			step.Args = p.parseWorkflowArgs()
+		default:
+			p.errf(t.Pos, "expected 'job', 'args', or '}' in step body, got %s", t.Kind)
+			p.recover(TokRBrace, TokJob, TokArgs, TokEOF)
+		}
+	}
+}
+
+// parseWorkflowComp: `compensate <step-name> { job <ns.Job> args { k: v, ... } }`.
+func (p *Parser) parseWorkflowComp() WorkflowCompDecl {
+	kw := p.expect(TokCompensate)
+	stepName := p.expect(TokIdent)
+	p.expect(TokLBrace)
+
+	comp := WorkflowCompDecl{Pos: kw.Pos, StepName: stepName.Value}
+	for {
+		t := p.peek()
+		switch t.Kind {
+		case TokRBrace, TokEOF:
+			p.expect(TokRBrace)
+			return comp
+		case TokJob:
+			p.advance()
+			comp.JobRef = p.parseEntityRef()
+		case TokArgs:
+			comp.Args = p.parseWorkflowArgs()
+		default:
+			p.errf(t.Pos, "expected 'job', 'args', or '}' in compensate body, got %s", t.Kind)
+			p.recover(TokRBrace, TokJob, TokArgs, TokEOF)
+		}
+	}
+}
+
+// parseWorkflowArgs: `args { name: expr, ... }` inside a step or
+// compensate block. Same grammar as enqueue args.
+func (p *Parser) parseWorkflowArgs() []EnqueueAssignment {
+	p.expect(TokArgs)
+	p.expect(TokLBrace)
+	var out []EnqueueAssignment
+	if p.peek().Kind == TokRBrace {
+		p.advance()
+		return out
+	}
+	for {
+		name := p.expect(TokIdent)
+		p.expect(TokColon)
+		val := p.parseExpr()
+		out = append(out, EnqueueAssignment{Pos: name.Pos, Name: name.Value, Value: val})
+		if _, ok := p.accept(TokComma); !ok {
+			break
+		}
+	}
+	p.expect(TokRBrace)
+	return out
 }

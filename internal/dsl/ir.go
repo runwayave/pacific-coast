@@ -39,6 +39,38 @@ type IR struct {
 	Queries    []CustomQuery     `json:"queries,omitempty"`
 	Procedures []CustomProcedure `json:"procedures,omitempty"`
 	Jobs       []Job             `json:"jobs,omitempty"`
+	Workflows  []Workflow        `json:"workflows,omitempty"`
+}
+
+// Workflow is a resolved multi-step orchestration. Steps execute in
+// declaration order; if a step's job fails after exhausting retries,
+// compensations for prior steps run in reverse. The state block
+// carries the typed inputs the caller provides at start time; each
+// step's args can reference state fields via $name.
+type Workflow struct {
+	Name          string           `json:"name"`
+	Namespace     string           `json:"namespace"`
+	State         []Field          `json:"state,omitempty"`
+	Steps         []WorkflowStepIR `json:"steps"`
+	Compensations []WorkflowCompIR `json:"compensations,omitempty"`
+	SourcePath    string           `json:"source_path,omitempty"`
+	Pos           Position         `json:"-"`
+}
+
+func (w *Workflow) ID() string { return w.Namespace + "." + w.Name }
+
+// WorkflowStepIR is one resolved step in a workflow.
+type WorkflowStepIR struct {
+	Name        string                `json:"name"`
+	TargetJobID string                `json:"target_job_id"`
+	Args        []EnqueueAssignmentIR `json:"args,omitempty"`
+}
+
+// WorkflowCompIR is one resolved compensation entry.
+type WorkflowCompIR struct {
+	StepName    string                `json:"step_name"`
+	TargetJobID string                `json:"target_job_id"`
+	Args        []EnqueueAssignmentIR `json:"args,omitempty"`
 }
 
 // CustomQuery is a resolved `query Name for Entity { ... }` declaration.
@@ -553,7 +585,7 @@ func Lower(files []*File) (*IR, error) {
 	for _, f := range files {
 		for _, d := range f.Decls {
 			switch d.(type) {
-			case *QueryDecl, *ProcedureDecl, *JobDecl:
+			case *QueryDecl, *ProcedureDecl, *JobDecl, *WorkflowDecl:
 				deferred = append(deferred, queryAST{file: f, decl: d})
 				continue
 			}
@@ -683,9 +715,30 @@ func Lower(files []*File) (*IR, error) {
 			ir.Procedures = append(ir.Procedures, *cp)
 		}
 	}
+	// Sub-pass 3c: workflows. Reference jobs by id (already in byJobID).
+	for _, q := range deferred {
+		d, ok := q.decl.(*WorkflowDecl)
+		if !ok {
+			continue
+		}
+		wf, werrs := lowerWorkflow(q.file.Path, d, byJobID)
+		errs = append(errs, werrs...)
+		if wf == nil {
+			continue
+		}
+		id := wf.ID()
+		if first, ok := customSeen[id]; ok {
+			errs = append(errs, fmt.Errorf("%s: duplicate workflow %s (first declared at %s)", d.Position(), id, first))
+			continue
+		}
+		customSeen[id] = d.Position()
+		ir.Workflows = append(ir.Workflows, *wf)
+	}
+
 	sort.Slice(ir.Queries, func(i, j int) bool { return ir.Queries[i].ID() < ir.Queries[j].ID() })
 	sort.Slice(ir.Procedures, func(i, j int) bool { return ir.Procedures[i].ID() < ir.Procedures[j].ID() })
 	sort.Slice(ir.Jobs, func(i, j int) bool { return ir.Jobs[i].ID() < ir.Jobs[j].ID() })
+	sort.Slice(ir.Workflows, func(i, j int) bool { return ir.Workflows[i].ID() < ir.Workflows[j].ID() })
 
 	if len(errs) > 0 {
 		return ir, errors.Join(errs...)
@@ -716,7 +769,7 @@ func lowerDecl(path string, d Decl) (*Entity, []error) {
 		}
 		errs = append(errs, lowerMembers(path, dd.Members, e)...)
 		return e, errs
-	case *QueryDecl, *ProcedureDecl, *JobDecl:
+	case *QueryDecl, *ProcedureDecl, *JobDecl, *WorkflowDecl:
 		// Handled in Lower's pass 3 after every entity has resolved.
 		// The Lower dispatcher already skips these before calling
 		// lowerDecl; this case keeps the switch exhaustive.
@@ -2051,4 +2104,95 @@ func lowerEnqueueValue(e Expr, inputs map[string]bool, procName string, stepIdx 
 		return nil, []error{fmt.Errorf("%s: procedure %s step %d: enqueue arg cannot be a compound expression", x.Pos, procName, stepIdx+1)}
 	}
 	return nil, []error{fmt.Errorf("procedure %s step %d: unknown enqueue arg type %T", procName, stepIdx+1, e)}
+}
+
+func lowerWorkflow(path string, d *WorkflowDecl, byJobID map[string]*Job) (*Workflow, []error) {
+	var errs []error
+	wf := &Workflow{
+		Name:       d.Name,
+		Namespace:  d.Namespace,
+		SourcePath: path,
+		Pos:        d.Pos,
+	}
+
+	// State fields: same lowering as job args (reject storage modifiers).
+	stateNames := make(map[string]bool, len(d.State))
+	for _, fd := range d.State {
+		f, ferrs := lowerField(fd)
+		errs = append(errs, ferrs...)
+		for _, mod := range fd.Modifiers {
+			switch mod.(type) {
+			case *ModPrimaryDecl, *ModIdentityDecl, *ModSerialDecl,
+				*ModUniqueDecl, *ModReferencesDecl, *ModBackfillDecl:
+				errs = append(errs, fmt.Errorf("%s: workflow state field %q: storage modifiers not allowed", mod.Position(), fd.Name))
+			}
+		}
+		f.Primary = false
+		f.Identity = false
+		f.Serial = false
+		f.Unique = false
+		f.Ref = nil
+		f.Backfill = ""
+		wf.State = append(wf.State, f)
+		stateNames[fd.Name] = true
+	}
+
+	// Steps: resolve job refs, lower args.
+	stepNames := make(map[string]bool, len(d.Steps))
+	for i, s := range d.Steps {
+		if stepNames[s.Name] {
+			errs = append(errs, fmt.Errorf("%s: workflow %s: duplicate step name %q", s.Pos, d.Name, s.Name))
+			continue
+		}
+		stepNames[s.Name] = true
+
+		ns := s.JobRef.Namespace
+		if ns == "" {
+			ns = d.Namespace
+		}
+		jobID := ns + "." + s.JobRef.Name
+		if _, ok := byJobID[jobID]; !ok {
+			errs = append(errs, fmt.Errorf("%s: workflow %s step %d %q: unknown job %s", s.Pos, d.Name, i+1, s.Name, jobID))
+			continue
+		}
+
+		step := WorkflowStepIR{Name: s.Name, TargetJobID: jobID}
+		for _, a := range s.Args {
+			val, vErrs := lowerEnqueueValue(a.Value, stateNames, d.Name, i)
+			errs = append(errs, vErrs...)
+			if val != nil {
+				step.Args = append(step.Args, EnqueueAssignmentIR{Name: a.Name, Value: val})
+			}
+		}
+		wf.Steps = append(wf.Steps, step)
+	}
+
+	// Compensations: each references a declared step.
+	for _, c := range d.Compensations {
+		if !stepNames[c.StepName] {
+			errs = append(errs, fmt.Errorf("%s: workflow %s: compensate references unknown step %q", c.Pos, d.Name, c.StepName))
+			continue
+		}
+		ns := c.JobRef.Namespace
+		if ns == "" {
+			ns = d.Namespace
+		}
+		jobID := ns + "." + c.JobRef.Name
+		if _, ok := byJobID[jobID]; !ok {
+			errs = append(errs, fmt.Errorf("%s: workflow %s compensate %q: unknown job %s", c.Pos, d.Name, c.StepName, jobID))
+			continue
+		}
+
+		comp := WorkflowCompIR{StepName: c.StepName, TargetJobID: jobID}
+		for _, a := range c.Args {
+			val, vErrs := lowerEnqueueValue(a.Value, stateNames, d.Name, 0)
+			errs = append(errs, vErrs...)
+			if val != nil {
+				comp.Args = append(comp.Args, EnqueueAssignmentIR{Name: a.Name, Value: val})
+			}
+		}
+		wf.Compensations = append(wf.Compensations, comp)
+	}
+
+	return wf, errs
 }

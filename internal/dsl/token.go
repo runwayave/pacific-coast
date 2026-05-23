@@ -135,6 +135,12 @@ const (
 	// Rows whose named column is in the past are swept by the
 	// built-in SweepExpired scheduled job.
 	TokTtlField
+
+	// Workflow orchestration tokens.
+	TokWorkflow   // `workflow <Name> in <ns> { ... }`
+	TokStep       // `step <name> { job <Job>; args { ... } }`
+	TokCompensate // `compensate <step-name> { job <Job>; args { ... } }`
+	TokState      // `state { ... }` — typed workflow-level inputs
 )
 
 var tokenNames = map[TokenKind]string{
@@ -236,6 +242,10 @@ var tokenNames = map[TokenKind]string{
 	TokEnqueue:        "enqueue",
 	TokVisibleTo:      "visible_to",
 	TokTtlField:       "ttl_field",
+	TokWorkflow:       "workflow",
+	TokStep:           "step",
+	TokCompensate:     "compensate",
+	TokState:          "state",
 }
 
 // String returns the textual form of the token kind.
@@ -328,6 +338,10 @@ var keywords = map[string]TokenKind{
 	"enqueue":    TokEnqueue,
 	"visible_to": TokVisibleTo,
 	"ttl_field":  TokTtlField,
+	"workflow":   TokWorkflow,
+	"step":       TokStep,
+	"compensate": TokCompensate,
+	"state":      TokState,
 }
 
 // Position is a 1-indexed source position used for error reporting,

@@ -791,3 +791,49 @@ type JobSchedule struct {
 	Pos      Position
 	CronSpec string
 }
+
+// ---- Workflows ----
+//
+// A workflow is a multi-step orchestration: each step runs a declared
+// job, steps execute in declaration order, and if a step fails after
+// exhausting retries, compensations for prior steps run in reverse
+// order. The DSL grammar mirrors Temporal's workflow-as-code model
+// but is declarative: the step sequence is fixed at schema time, not
+// built dynamically at runtime.
+
+// WorkflowDecl: `workflow <Name> in <ns> { state { ... } step <name> { ... } ... compensate <step> { ... } }`.
+type WorkflowDecl struct {
+	Pos           Position
+	Name          string
+	Namespace     string
+	State         []*FieldDecl       // typed inputs the caller provides at start
+	Steps         []WorkflowStepDecl // ordered; executed top-to-bottom
+	Compensations []WorkflowCompDecl // each names a step to undo on failure
+}
+
+func (*WorkflowDecl) isDecl()              {}
+func (w *WorkflowDecl) Position() Position { return w.Pos }
+func (w *WorkflowDecl) DeclName() string   { return w.Name }
+
+// WorkflowStepDecl: `step <name> { job <JobRef> args { name: expr, ... } }`.
+// Each step runs the named job with the provided args. The step name
+// is the key compensations reference; it must be unique within the
+// workflow.
+type WorkflowStepDecl struct {
+	Pos    Position
+	Name   string
+	JobRef EntityRef           // reusing EntityRef for [ns.]JobName resolution
+	Args   []EnqueueAssignment // name: value pairs, same grammar as enqueue
+}
+
+// WorkflowCompDecl: `compensate <step-name> { job <JobRef> args { ... } }`.
+// Runs the named job to undo the corresponding step. Compensations
+// execute in reverse step order on workflow failure; a compensation
+// that itself fails moves the workflow to `failed` with diagnostic
+// detail for the operator to intervene manually.
+type WorkflowCompDecl struct {
+	Pos      Position
+	StepName string // must match a declared step
+	JobRef   EntityRef
+	Args     []EnqueueAssignment
+}
