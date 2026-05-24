@@ -74,6 +74,7 @@ func cmdCodegen(args []string) int {
 		{"go custom client", func() ([]codegen.GoFile, error) { return codegen.EmitCustomClient(newIR) }},
 		{"go jobs handlers", func() ([]codegen.GoFile, error) { return codegen.EmitJobsHandlers(newIR) }},
 		{"go workflows", func() ([]codegen.GoFile, error) { return codegen.EmitWorkflows(newIR) }},
+		{"go ephemerals", func() ([]codegen.GoFile, error) { return codegen.EmitEphemerals(newIR) }},
 	}
 	written := 0
 	for _, em := range emitters {

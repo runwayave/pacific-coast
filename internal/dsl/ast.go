@@ -837,3 +837,24 @@ type WorkflowCompDecl struct {
 	JobRef   EntityRef
 	Args     []EnqueueAssignment
 }
+
+// ---- Ephemeral (memcached-only) declarations ----
+//
+// An `ephemeral` is a typed data shape backed by memcached, not
+// Postgres. No table, no migration, no VACUUM. Codegen emits typed
+// Get/Set/Delete methods. The TTL is declared at the block level;
+// loss on eviction is the documented contract (callers must handle
+// cache-miss gracefully).
+
+// EphemeralDecl: `ephemeral <Name> in <ns> { key <type> <fields...> ttl <duration> }`.
+type EphemeralDecl struct {
+	Pos       Position
+	Name      string
+	Namespace string
+	Fields    []*FieldDecl
+	TTL       *JobTimeout // reuses the duration AST node
+}
+
+func (*EphemeralDecl) isDecl()              {}
+func (e *EphemeralDecl) Position() Position { return e.Pos }
+func (e *EphemeralDecl) DeclName() string   { return e.Name }

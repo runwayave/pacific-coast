@@ -40,7 +40,25 @@ type IR struct {
 	Procedures []CustomProcedure `json:"procedures,omitempty"`
 	Jobs       []Job             `json:"jobs,omitempty"`
 	Workflows  []Workflow        `json:"workflows,omitempty"`
+	Ephemerals []Ephemeral       `json:"ephemerals,omitempty"`
 }
+
+// Ephemeral is a resolved `ephemeral Name in ns { ... }` declaration.
+// Memcached-only: no Postgres table, no migration DDL. Codegen emits
+// typed Get/Set/Delete backed by the atlantis memcached client. Fields
+// describe the value shape (serialized as JSON into the cache); the
+// first field marked `primary` is the cache key. TTLMS is the default
+// time-to-live in milliseconds.
+type Ephemeral struct {
+	Name       string   `json:"name"`
+	Namespace  string   `json:"namespace"`
+	Fields     []Field  `json:"fields"`
+	TTLMS      int      `json:"ttl_ms,omitempty"`
+	SourcePath string   `json:"source_path,omitempty"`
+	Pos        Position `json:"-"`
+}
+
+func (e *Ephemeral) ID() string { return e.Namespace + "." + e.Name }
 
 // Workflow is a resolved multi-step orchestration. Steps execute in
 // declaration order; if a step's job fails after exhausting retries,
@@ -585,7 +603,7 @@ func Lower(files []*File) (*IR, error) {
 	for _, f := range files {
 		for _, d := range f.Decls {
 			switch d.(type) {
-			case *QueryDecl, *ProcedureDecl, *JobDecl, *WorkflowDecl:
+			case *QueryDecl, *ProcedureDecl, *JobDecl, *WorkflowDecl, *EphemeralDecl:
 				deferred = append(deferred, queryAST{file: f, decl: d})
 				continue
 			}
@@ -740,6 +758,27 @@ func Lower(files []*File) (*IR, error) {
 	sort.Slice(ir.Jobs, func(i, j int) bool { return ir.Jobs[i].ID() < ir.Jobs[j].ID() })
 	sort.Slice(ir.Workflows, func(i, j int) bool { return ir.Workflows[i].ID() < ir.Workflows[j].ID() })
 
+	// Sub-pass 3d: ephemerals (memcached-only data shapes).
+	for _, q := range deferred {
+		d, ok := q.decl.(*EphemeralDecl)
+		if !ok {
+			continue
+		}
+		eph, eerrs := lowerEphemeral(q.file.Path, d)
+		errs = append(errs, eerrs...)
+		if eph == nil {
+			continue
+		}
+		id := eph.ID()
+		if first, ok := customSeen[id]; ok {
+			errs = append(errs, fmt.Errorf("%s: duplicate ephemeral %s (first declared at %s)", d.Position(), id, first))
+			continue
+		}
+		customSeen[id] = d.Position()
+		ir.Ephemerals = append(ir.Ephemerals, *eph)
+	}
+	sort.Slice(ir.Ephemerals, func(i, j int) bool { return ir.Ephemerals[i].ID() < ir.Ephemerals[j].ID() })
+
 	if len(errs) > 0 {
 		return ir, errors.Join(errs...)
 	}
@@ -769,7 +808,7 @@ func lowerDecl(path string, d Decl) (*Entity, []error) {
 		}
 		errs = append(errs, lowerMembers(path, dd.Members, e)...)
 		return e, errs
-	case *QueryDecl, *ProcedureDecl, *JobDecl, *WorkflowDecl:
+	case *QueryDecl, *ProcedureDecl, *JobDecl, *WorkflowDecl, *EphemeralDecl:
 		// Handled in Lower's pass 3 after every entity has resolved.
 		// The Lower dispatcher already skips these before calling
 		// lowerDecl; this case keeps the switch exhaustive.
@@ -2195,4 +2234,33 @@ func lowerWorkflow(path string, d *WorkflowDecl, byJobID map[string]*Job) (*Work
 	}
 
 	return wf, errs
+}
+
+func lowerEphemeral(path string, d *EphemeralDecl) (*Ephemeral, []error) {
+	var errs []error
+	eph := &Ephemeral{
+		Name:       d.Name,
+		Namespace:  d.Namespace,
+		SourcePath: path,
+		Pos:        d.Pos,
+	}
+	for _, fd := range d.Fields {
+		f, ferrs := lowerField(fd)
+		errs = append(errs, ferrs...)
+		// Ephemeral fields don't need storage modifiers — strip them.
+		f.Serial = false
+		f.Identity = false
+		f.Ref = nil
+		f.Backfill = ""
+		eph.Fields = append(eph.Fields, f)
+	}
+	if d.TTL != nil {
+		ms, perr := parseDurationMS(d.TTL.Duration)
+		if perr != nil {
+			errs = append(errs, fmt.Errorf("%s: invalid ttl %q: %v", d.TTL.Pos, d.TTL.Duration, perr))
+		} else {
+			eph.TTLMS = ms
+		}
+	}
+	return eph, errs
 }

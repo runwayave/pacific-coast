@@ -141,6 +141,11 @@ const (
 	TokStep       // `step <name> { job <Job>; args { ... } }`
 	TokCompensate // `compensate <step-name> { job <Job>; args { ... } }`
 	TokState      // `state { ... }` — typed workflow-level inputs
+
+	// TokEphemeral declares a memcached-only data shape with a TTL.
+	// No Postgres table, no migration, no VACUUM. Codegen emits typed
+	// Get/Set/Delete backed by the atlantis memcached client.
+	TokEphemeral
 )
 
 var tokenNames = map[TokenKind]string{
@@ -246,6 +251,7 @@ var tokenNames = map[TokenKind]string{
 	TokStep:           "step",
 	TokCompensate:     "compensate",
 	TokState:          "state",
+	TokEphemeral:      "ephemeral",
 }
 
 // String returns the textual form of the token kind.
@@ -342,6 +348,7 @@ var keywords = map[string]TokenKind{
 	"step":       TokStep,
 	"compensate": TokCompensate,
 	"state":      TokState,
+	"ephemeral":  TokEphemeral,
 }
 
 // Position is a 1-indexed source position used for error reporting,

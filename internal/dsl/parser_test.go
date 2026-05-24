@@ -336,7 +336,7 @@ func TestParse_Error_MissingBrace(t *testing.T) {
 
 func TestParse_Error_UnknownTopLevel(t *testing.T) {
 	err := mustParseErr(t, `widget Foo in x {}`)
-	if !strings.Contains(err.Error(), "expected 'entity', 'hypertable', 'query', 'procedure', 'job', or 'workflow'") {
+	if !strings.Contains(err.Error(), "expected top-level declaration") {
 		t.Errorf("error message lacks hint: %v", err)
 	}
 }

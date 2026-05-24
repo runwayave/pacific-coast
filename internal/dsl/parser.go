@@ -135,9 +135,13 @@ func (p *Parser) parseFile() *File {
 			if d := p.parseWorkflow(); d != nil {
 				f.Decls = append(f.Decls, d)
 			}
+		case TokEphemeral:
+			if d := p.parseEphemeral(); d != nil {
+				f.Decls = append(f.Decls, d)
+			}
 		default:
-			p.errf(t.Pos, "expected 'entity', 'hypertable', 'query', 'procedure', 'job', or 'workflow', got %s", t.Kind)
-			p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow)
+			p.errf(t.Pos, "expected top-level declaration, got %s", t.Kind)
+			p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow, TokEphemeral)
 		}
 	}
 }
@@ -1418,4 +1422,44 @@ func (p *Parser) parseWorkflowArgs() []EnqueueAssignment {
 	}
 	p.expect(TokRBrace)
 	return out
+}
+
+// parseEphemeral: `ephemeral <Name> in <ns> { <fields...> ttl <duration> }`.
+func (p *Parser) parseEphemeral() *EphemeralDecl {
+	kw := p.expect(TokEphemeral)
+	if kw.Kind == TokError {
+		p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow, TokEphemeral)
+		return nil
+	}
+	name := p.expect(TokIdent)
+	p.expect(TokIn)
+	ns := p.expect(TokIdent)
+	p.expect(TokLBrace)
+
+	eph := &EphemeralDecl{
+		Pos:       kw.Pos,
+		Name:      name.Value,
+		Namespace: ns.Value,
+	}
+
+	for {
+		t := p.peek()
+		switch t.Kind {
+		case TokRBrace, TokEOF:
+			p.expect(TokRBrace)
+			return eph
+		case TokTtl:
+			p.advance()
+			p.expect(TokEquals)
+			d := p.expect(TokDuration)
+			eph.TTL = &JobTimeout{Pos: t.Pos, Duration: d.Value}
+		case TokIdent:
+			if f := p.parseField(); f != nil {
+				eph.Fields = append(eph.Fields, f)
+			}
+		default:
+			p.errf(t.Pos, "expected field name, 'ttl', or '}' in ephemeral body, got %s", t.Kind)
+			p.recover(TokRBrace, TokIdent, TokTtl, TokEOF)
+		}
+	}
 }
