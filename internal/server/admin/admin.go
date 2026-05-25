@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -140,6 +141,7 @@ type ApplyRequest struct {
 // ApplyResponse is returned on a successful apply.
 type ApplyResponse struct {
 	AppliedAt string
+	Version   int64
 }
 
 // GetMergedSchemaRequest asks for the union of every caller's registered files.
@@ -209,7 +211,13 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 
 	// Assign proto numbers before diffing so both sides see stable IDs.
 	codegen.AssignProtoNumbers(prior, newIR)
-	d := codegen.ComputeDiff(prior, newIR)
+
+	// Build caller-ownership context so the diff engine can downgrade
+	// removals that only affect the submitting caller.
+	ownership := buildEntityOwnership(req.Caller, callerFiles, others)
+	crossRefs := buildCrossCallerRefs(others)
+	d := codegen.ComputeDiff(prior, newIR,
+		codegen.WithCallerContext(req.Caller, ownership, crossRefs))
 
 	// Validate every custom query/procedure with pg_query_go. Lowering catches
 	// dep-free rules; this catches syntax and unresolved table refs.
@@ -346,7 +354,12 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 		return nil, err
 	}
 	codegen.AssignProtoNumbers(prior, newIR)
-	d := codegen.ComputeDiff(prior, newIR)
+
+	// Build caller-ownership context for the diff (same as PlanSchema).
+	applyOwnership := buildEntityOwnership(req.Caller, parsed, others)
+	applyCrossRefs := buildCrossCallerRefs(others)
+	d := codegen.ComputeDiff(prior, newIR,
+		codegen.WithCallerContext(req.Caller, applyOwnership, applyCrossRefs))
 
 	// Re-validate inside the lock: another caller's apply between plan and apply
 	// can change which tables are visible.
@@ -376,7 +389,17 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 		return nil, fmt.Errorf("apply: %w", err)
 	}
 
-	if err := s.persistCheckpoint(ctx, tx, newIR, req.Caller); err != nil {
+	meta := versionMeta{
+		Caller:    req.Caller,
+		PlanClass: d.HighestClass().String(),
+		Diff:      d,
+		UpSQL:     scripts.Up,
+		DownSQL:   scripts.Down,
+		PlanID:    gotPlanID,
+		EventType: "apply",
+	}
+	version, err := s.persistCheckpoint(ctx, tx, newIR, meta)
+	if err != nil {
 		return nil, err
 	}
 
@@ -392,7 +415,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 		}
 	}
 
-	return &ApplyResponse{AppliedAt: nowUTC()}, nil
+	return &ApplyResponse{AppliedAt: nowUTC(), Version: version}, nil
 }
 
 // mirrorFiles writes each file atomically to <root>/<caller>/<path>.
@@ -623,16 +646,70 @@ func (s *Service) loadCheckpointTx(ctx context.Context, tx pgx.Tx) (*dsl.IR, err
 	return dsl.DecodeJSONIR(raw)
 }
 
-func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, caller string) error {
+// versionMeta holds the metadata for one schema_versions row. Passed to
+// persistCheckpoint so the caller can supply the diff, SQL, plan ID, and
+// event type without persistCheckpoint needing to know how they were
+// produced.
+type versionMeta struct {
+	Caller    string
+	PlanClass string
+	Diff      *codegen.Diff
+	UpSQL     string
+	DownSQL   string
+	PlanID    string
+	EventType string // "apply", "rollback", "adopt"
+	ParentVer *int64
+}
+
+func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, meta versionMeta) (int64, error) {
 	raw, err := ir.EncodeJSON()
 	if err != nil {
-		return err
+		return 0, err
 	}
+
+	// Existing ir_checkpoint upsert — the authoritative "current IR" row.
 	_, err = tx.Exec(ctx, `
 INSERT INTO atlantis.ir_checkpoint (id, ir, applied_by) VALUES (1, $1, $2)
 ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by = EXCLUDED.applied_by`,
-		raw, caller)
-	return err
+		raw, meta.Caller)
+	if err != nil {
+		return 0, fmt.Errorf("upsert ir_checkpoint: %w", err)
+	}
+
+	// Serialize diff to JSON; nil diff becomes an empty object.
+	var diffJSON []byte
+	if meta.Diff != nil {
+		diffJSON, err = json.Marshal(meta.Diff)
+		if err != nil {
+			return 0, fmt.Errorf("marshal diff: %w", err)
+		}
+	} else {
+		diffJSON = []byte(`{"additive":[],"backfill_required":[],"breaking":[]}`)
+	}
+
+	// ir_hash = sha256 of the canonical IR JSON.
+	h := sha256.Sum256(raw)
+	irHash := hex.EncodeToString(h[:])
+
+	// Insert versioned row and return the auto-generated version number.
+	var version int64
+	err = tx.QueryRow(ctx, `
+INSERT INTO atlantis.schema_versions
+    (caller, plan_class, diff, up_sql, down_sql, ir_snapshot, ir_hash, plan_id, parent_version, event_type)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING version`,
+		meta.Caller, meta.PlanClass, diffJSON, meta.UpSQL, meta.DownSQL,
+		raw, irHash, meta.PlanID, meta.ParentVer, meta.EventType,
+	).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("insert schema_versions: %w", err)
+	}
+
+	if err := updateEntityLineage(ctx, tx, version, meta.Caller, meta.Diff); err != nil {
+		return 0, fmt.Errorf("update entity lineage: %w", err)
+	}
+
+	return version, nil
 }
 
 // computePlanID hashes (caller, files, prior checkpoint hash) so applies can
@@ -703,24 +780,46 @@ func buildImpactReport(planCaller string, others []*dsl.File, d *codegen.Diff, _
 		otherByCaller[c] = append(otherByCaller[c], f.Path)
 	}
 
+	// Build a set of entity IDs declared in each other caller's files so
+	// we can determine whether a caller is actually affected by the diff.
+	callerEntities := map[string]map[string]bool{} // caller → set of entityIDs
+	for _, f := range others {
+		c := f.Path
+		if i := indexOf(c, ':'); i >= 0 {
+			c = c[:i]
+		}
+		if callerEntities[c] == nil {
+			callerEntities[c] = map[string]bool{}
+		}
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *dsl.EntityDecl:
+				callerEntities[c][d.Namespace+"."+d.Name] = true
+			case *dsl.HypertableDecl:
+				callerEntities[c][d.Namespace+"."+d.Name] = true
+			}
+		}
+	}
+
 	var report []ImpactEntry
 	for caller := range otherByCaller {
 		affected := false
-		for entID := range touched {
-			if entID == "" {
-				continue
+		if ents, ok := callerEntities[caller]; ok {
+			for entID := range touched {
+				if entID != "" && ents[entID] {
+					affected = true
+					break
+				}
 			}
-			// A caller is affected if the diff names an entity they declared.
-			// We don't currently track per-file ownership; flagging by caller-
-			// name match in the path prefix is a coarse approximation.
-			_ = entID
-			affected = true
-			break
+		}
+		detail := fmt.Sprintf("%d change(s) touched the union", count)
+		if affected {
+			detail = fmt.Sprintf("%d change(s) touch entities this caller declares", count)
 		}
 		report = append(report, ImpactEntry{
 			Caller:   caller,
 			Affected: affected,
-			Detail:   fmt.Sprintf("%d change(s) touched the union", count),
+			Detail:   detail,
 		})
 	}
 	report = append(report, ImpactEntry{
@@ -740,6 +839,108 @@ func indexOf(s string, c byte) int {
 		}
 	}
 	return -1
+}
+
+// buildEntityOwnership returns a map of entityID → caller for every entity
+// declared across the submitting caller's files and all other callers' files.
+// The caller name is extracted from the file path prefix ("caller:path").
+func buildEntityOwnership(callerName string, callerFiles []*dsl.File, otherFiles []*dsl.File) map[string]string {
+	out := map[string]string{}
+
+	// Helper: walk one file's decls and attribute entities to the given caller.
+	register := func(caller string, f *dsl.File) {
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *dsl.EntityDecl:
+				out[d.Namespace+"."+d.Name] = caller
+			case *dsl.HypertableDecl:
+				out[d.Namespace+"."+d.Name] = caller
+			}
+		}
+	}
+
+	for _, f := range callerFiles {
+		register(callerName, f)
+	}
+	for _, f := range otherFiles {
+		c := f.Path
+		if i := indexOf(c, ':'); i >= 0 {
+			c = c[:i]
+		}
+		register(c, f)
+	}
+	return out
+}
+
+// buildCrossCallerRefs scans other callers' parsed files and returns a set
+// of entity IDs and "entityID.fieldName" strings that are referenced by
+// callers other than the submitter. A reference is any `references
+// ns.Entity.field` modifier on a FieldDecl in another caller's file.
+//
+// This is a conservative scan over the AST — it does not need the lowered IR.
+func buildCrossCallerRefs(otherFiles []*dsl.File) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range otherFiles {
+		for _, decl := range f.Decls {
+			var members []dsl.EntityMember
+			switch d := decl.(type) {
+			case *dsl.EntityDecl:
+				members = d.Members
+			case *dsl.HypertableDecl:
+				members = d.Members
+			default:
+				// QueryDecl / ProcedureDecl: scan touches() for entity refs.
+				scanDeclTouches(decl, out)
+				continue
+			}
+			for _, m := range members {
+				fd, ok := m.(*dsl.FieldDecl)
+				if !ok {
+					continue
+				}
+				for _, mod := range fd.Modifiers {
+					ref, ok := mod.(*dsl.ModReferencesDecl)
+					if !ok {
+						continue
+					}
+					targetID := ref.TargetNS + "." + ref.TargetEntity
+					out[targetID] = true
+					out[targetID+"."+ref.TargetField] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// scanDeclTouches extracts entity references from touches() clauses on
+// QueryDecl and ProcedureDecl and adds them to the refs set. This ensures
+// that entities mentioned in another caller's custom queries/procedures are
+// treated as cross-referenced.
+func scanDeclTouches(decl dsl.Decl, refs map[string]bool) {
+	switch d := decl.(type) {
+	case *dsl.QueryDecl:
+		if d.SQL != nil {
+			for _, t := range d.SQL.Touches {
+				if t.Namespace != "" {
+					refs[t.Namespace+"."+t.Name] = true
+				}
+			}
+		}
+	case *dsl.ProcedureDecl:
+		for _, step := range d.Steps {
+			if step.Raw != nil {
+				for _, t := range step.Raw.Touches {
+					if t.Namespace != "" {
+						refs[t.Namespace+"."+t.Name] = true
+					}
+				}
+			}
+			if step.Typed != nil && step.Typed.Target.Namespace != "" {
+				refs[step.Typed.Target.Namespace+"."+step.Typed.Target.Name] = true
+			}
+		}
+	}
 }
 
 // nowUTC returns the current UTC time formatted as RFC3339. Broken out so

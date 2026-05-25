@@ -58,6 +58,16 @@ func main() {
 		os.Exit(cmdJob(os.Args[2:]))
 	case "workflow":
 		os.Exit(cmdWorkflow(os.Args[2:]))
+	case "history":
+		os.Exit(cmdHistory(os.Args[2:]))
+	case "diff":
+		os.Exit(cmdDiff(os.Args[2:]))
+	case "blame":
+		os.Exit(cmdBlame(os.Args[2:]))
+	case "owners":
+		os.Exit(cmdOwners(os.Args[2:]))
+	case "rollback":
+		os.Exit(cmdRollback(os.Args[2:]))
 	case "version":
 		fmt.Println("tide", version)
 	default:
@@ -76,6 +86,11 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       tide backfill status [plan-hash]")
 	fmt.Fprintln(os.Stderr, "       tide job      submit|status|dead|retry ...")
 	fmt.Fprintln(os.Stderr, "       tide workflow start|status ...")
+	fmt.Fprintln(os.Stderr, "       tide history  [--limit N] [--caller X]")
+	fmt.Fprintln(os.Stderr, "       tide diff     <from-version> <to-version>")
+	fmt.Fprintln(os.Stderr, "       tide blame    <entity-id>")
+	fmt.Fprintln(os.Stderr, "       tide owners")
+	fmt.Fprintln(os.Stderr, "       tide rollback --to=<version> [--dry-run] [--yes]")
 	fmt.Fprintln(os.Stderr, "       tide version")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Reads ./tide.yaml for schema paths and atlantis endpoint.")

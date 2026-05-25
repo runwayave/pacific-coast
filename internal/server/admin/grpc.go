@@ -67,6 +67,12 @@ type AdminServer interface {
 	RetryDeadJob(context.Context, RetryDeadJobRequest) (*RetryDeadJobResponse, error)
 	StartWorkflow(context.Context, StartWorkflowRequest) (*StartWorkflowResponse, error)
 	GetWorkflowStatus(context.Context, GetWorkflowStatusRequest) (*GetWorkflowStatusResponse, error)
+	GetSchemaHistory(context.Context, GetSchemaHistoryRequest) (*GetSchemaHistoryResponse, error)
+	GetSchemaVersion(context.Context, GetSchemaVersionRequest) (*GetSchemaVersionResponse, error)
+	DiffSchemaVersions(context.Context, DiffSchemaVersionsRequest) (*DiffSchemaVersionsResponse, error)
+	GetEntityLineage(context.Context, GetEntityLineageRequest) (*GetEntityLineageResponse, error)
+	GetEntityOwners(context.Context, GetEntityOwnersRequest) (*GetEntityOwnersResponse, error)
+	RollbackSchema(context.Context, RollbackSchemaRequest) (*RollbackSchemaResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -100,6 +106,12 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "RetryDeadJob", Handler: handleRetryDeadJob},
 		{MethodName: "StartWorkflow", Handler: handleStartWorkflow},
 		{MethodName: "GetWorkflowStatus", Handler: handleGetWorkflowStatus},
+		{MethodName: "GetSchemaHistory", Handler: handleGetSchemaHistory},
+		{MethodName: "GetSchemaVersion", Handler: handleGetSchemaVersion},
+		{MethodName: "DiffSchemaVersions", Handler: handleDiffSchemaVersions},
+		{MethodName: "GetEntityLineage", Handler: handleGetEntityLineage},
+		{MethodName: "GetEntityOwners", Handler: handleGetEntityOwners},
+		{MethodName: "RollbackSchema", Handler: handleRollbackSchema},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "atlantis/admin/v1/admin.proto",
@@ -492,6 +504,198 @@ func handleGetWorkflowStatus(srv any, ctx context.Context, dec func(any) error, 
 
 func invokeGetWorkflowStatus(svc *Service, ctx context.Context, req *GetWorkflowStatusRequest) (any, error) {
 	resp, err := svc.GetWorkflowStatus(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+// --- Schema versioning RPCs ---
+
+func handleGetSchemaHistory(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetSchemaHistoryRequest
+	if len(in.Raw) > 0 {
+		if err := json.Unmarshal(in.Raw, &req); err != nil {
+			return nil, err
+		}
+	}
+	if interceptor == nil {
+		return invokeGetSchemaHistory(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetSchemaHistory"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetSchemaHistory(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetSchemaHistory(svc *Service, ctx context.Context, req *GetSchemaHistoryRequest) (any, error) {
+	resp, err := svc.GetSchemaHistory(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetSchemaVersion(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetSchemaVersionRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeGetSchemaVersion(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetSchemaVersion"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetSchemaVersion(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetSchemaVersion(svc *Service, ctx context.Context, req *GetSchemaVersionRequest) (any, error) {
+	resp, err := svc.GetSchemaVersion(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleDiffSchemaVersions(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req DiffSchemaVersionsRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeDiffSchemaVersions(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/DiffSchemaVersions"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeDiffSchemaVersions(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeDiffSchemaVersions(svc *Service, ctx context.Context, req *DiffSchemaVersionsRequest) (any, error) {
+	resp, err := svc.DiffSchemaVersions(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetEntityLineage(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetEntityLineageRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeGetEntityLineage(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetEntityLineage"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetEntityLineage(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetEntityLineage(svc *Service, ctx context.Context, req *GetEntityLineageRequest) (any, error) {
+	resp, err := svc.GetEntityLineage(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetEntityOwners(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetEntityOwnersRequest
+	if len(in.Raw) > 0 {
+		if err := json.Unmarshal(in.Raw, &req); err != nil {
+			return nil, err
+		}
+	}
+	if interceptor == nil {
+		return invokeGetEntityOwners(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetEntityOwners"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetEntityOwners(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetEntityOwners(svc *Service, ctx context.Context, req *GetEntityOwnersRequest) (any, error) {
+	resp, err := svc.GetEntityOwners(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleRollbackSchema(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req RollbackSchemaRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeRollbackSchema(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/RollbackSchema"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeRollbackSchema(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeRollbackSchema(svc *Service, ctx context.Context, req *RollbackSchemaRequest) (any, error) {
+	resp, err := svc.RollbackSchema(ctx, *req)
 	if err != nil {
 		return nil, err
 	}

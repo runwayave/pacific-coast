@@ -57,6 +57,11 @@ atlantis.dev.yaml
 # Local tide cache (in case someone runs `tide` from within this repo)
 .tide-cache/
 
+# Schema mirror: `tide apply` with ATL_MIRROR_SCHEMA=true writes caller
+# .atl files here so `tidectl codegen --schema-dir=schema` can read them.
+# The source of truth for .atl files is the caller repos, not this mirror.
+/schema/
+
 # Local IR scratch files
 *.last-ir.scratch.json
 

@@ -45,6 +45,10 @@ func main() {
 		{"migrate-down", "Run golang-migrate down 1 against $PG_URL", cmdMigrateDown},
 		{"dev", "Codegen + build + exec server from atlantis.dev.yaml (local iteration)", cmdDev},
 		{"adopt", "Verify the live DB matches the declared .atl files and seed the IR checkpoint as the baseline", cmdAdopt},
+		{"history", "Show schema version history", cmdHistory},
+		{"blame", "Show per-field provenance for an entity", cmdBlame},
+		{"owners", "Show entity ownership map", cmdOwners},
+		{"rollback", "Revert to a prior schema version", cmdRollback},
 		{"version", "Print tidectl version", cmdVersion},
 	}
 

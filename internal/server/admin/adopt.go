@@ -211,7 +211,13 @@ func (s *Service) AdoptBaseline(ctx context.Context, req AdoptBaselineRequest) (
 	// filtering, adopt would baseline phantom entities (RPCs reachable
 	// but failing at runtime against missing tables).
 	baseline := filterToExistingEntities(declaredIR, existingIDs)
-	if err := s.persistCheckpoint(ctx, tx, baseline, "adopt"); err != nil {
+	_, err = s.persistCheckpoint(ctx, tx, baseline, versionMeta{
+		Caller:    "adopt",
+		PlanClass: "adopt",
+		Diff:      d,
+		EventType: "adopt",
+	})
+	if err != nil {
 		return nil, err
 	}
 

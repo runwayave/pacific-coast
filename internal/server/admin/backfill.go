@@ -210,7 +210,16 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 		}
 	}
 
-	if err := s.persistCheckpoint(ctx, tx, newIR, req.Caller); err != nil {
+	backfillDiff := codegen.ComputeDiff(prior, newIR)
+	_, err = s.persistCheckpoint(ctx, tx, newIR, versionMeta{
+		Caller:    req.Caller,
+		PlanClass: backfillDiff.HighestClass().String(),
+		Diff:      backfillDiff,
+		UpSQL:     req.PreBackfillUpSQL,
+		PlanID:    req.PlanID,
+		EventType: "apply",
+	})
+	if err != nil {
 		return nil, err
 	}
 
