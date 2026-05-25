@@ -182,6 +182,102 @@ func TestIndexOf(t *testing.T) {
 	}
 }
 
+// ---- buildEntityOwnership tests ----
+
+func TestBuildEntityOwnership_AssignsCallerCorrectly(t *testing.T) {
+	callerFiles := parseSrc(t, "vendor", `entity Product in vendor { id bigint primary }`)
+	otherFiles := parseSrc(t, "consumer", `entity Account in consumer { id bigint primary }`)
+	own := buildEntityOwnership("vendor", callerFiles, otherFiles)
+
+	if own["vendor.Product"] != "vendor" {
+		t.Errorf("vendor.Product should be owned by vendor, got %q", own["vendor.Product"])
+	}
+	if own["consumer.Account"] != "consumer" {
+		t.Errorf("consumer.Account should be owned by consumer, got %q", own["consumer.Account"])
+	}
+}
+
+// ---- buildCrossCallerRefs tests ----
+
+func TestBuildCrossCallerRefs_DetectsFK(t *testing.T) {
+	otherFiles := parseSrc(t, "consumer", `
+entity Account in consumer {
+  id bigint primary
+  product_id bigint references vendor.Product.id
+}
+`)
+	refs := buildCrossCallerRefs(otherFiles)
+
+	if !refs["vendor.Product"] {
+		t.Error("expected vendor.Product in cross-caller refs (entity-level)")
+	}
+	if !refs["vendor.Product.id"] {
+		t.Error("expected vendor.Product.id in cross-caller refs (field-level)")
+	}
+}
+
+func TestBuildCrossCallerRefs_EmptyWhenNoRefs(t *testing.T) {
+	otherFiles := parseSrc(t, "consumer", `entity Account in consumer { id bigint primary }`)
+	refs := buildCrossCallerRefs(otherFiles)
+	if len(refs) != 0 {
+		t.Errorf("expected empty refs, got %v", refs)
+	}
+}
+
+// ---- impact report fix test ----
+
+func TestImpactReport_OnlyAffectedCallersMarked(t *testing.T) {
+	d := &codegen.Diff{
+		Additive: []codegen.Change{
+			{Kind: codegen.KindFieldAdded, EntityID: "vendor.Product", Detail: "added"},
+		},
+	}
+	// consumer declares consumer.Account, not vendor.Product
+	others := parseSrc(t, "consumer", `entity Account in consumer { id bigint primary }`)
+	rep := buildImpactReport("vendor", others, d, nil)
+
+	for _, entry := range rep {
+		if entry.Caller == "consumer" && entry.Affected {
+			t.Error("consumer should NOT be marked affected — the diff only touches vendor.Product")
+		}
+	}
+}
+
+func TestImpactReport_AffectedCallerMarked(t *testing.T) {
+	d := &codegen.Diff{
+		Additive: []codegen.Change{
+			{Kind: codegen.KindFieldAdded, EntityID: "vendor.Product", Detail: "added"},
+		},
+	}
+	// other caller also declares vendor.Product
+	others := parseSrc(t, "other", `entity Product in vendor { id bigint primary  name text }`)
+	rep := buildImpactReport("submitter", others, d, nil)
+
+	found := false
+	for _, entry := range rep {
+		if entry.Caller == "other" {
+			found = true
+			if !entry.Affected {
+				t.Error("other caller who declares vendor.Product should be marked affected")
+			}
+		}
+	}
+	if !found {
+		t.Error("other caller should appear in the impact report")
+	}
+}
+
+// parseSrc is a test helper that parses a single .atl source string as if
+// submitted by the given caller, returning the parsed file slice.
+func parseSrc(t *testing.T, caller, src string) []*dsl.File {
+	t.Helper()
+	f, err := dsl.Parse(caller+":test.atl", []byte(src))
+	if err != nil {
+		t.Fatalf("parse %s: %v", caller, err)
+	}
+	return []*dsl.File{f}
+}
+
 // Full Plan / Apply paths require Postgres and are covered in the
 // integration harness (task #25). The pure-Go pieces above pin the
 // classification, ID stability, and impact-report shape — the parts that

@@ -516,3 +516,121 @@ func TestDiff_TableNameAppeared_IsBreaking(t *testing.T) {
 		t.Error("expected KindEntityTableChanged on table-override appearance")
 	}
 }
+
+// ---- Caller-context-aware removal tests ----
+
+// TestDiff_FieldRemoved_OwnedNoCrossRef_IsAdditive: when the submitting
+// caller owns the entity and no other caller references the removed field,
+// the removal is downgraded to additive.
+func TestDiff_FieldRemoved_OwnedNoCrossRef_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  brand text }`)
+	newIR := lower(t, `entity A in x { id bigint primary }`)
+
+	ownership := map[string]string{"x.A": "vendor"}
+	refs := map[string]bool{} // no cross-refs
+	d := ComputeDiff(oldIR, newIR, WithCallerContext("vendor", ownership, refs))
+
+	c := findChange(t, d, KindFieldRemoved)
+	if c == nil {
+		t.Fatal("expected KindFieldRemoved change")
+	}
+	if c.Class != ClassAdditive {
+		t.Errorf("field removal by owner with no cross-refs should be additive, got %v", c.Class)
+	}
+	if d.HighestClass() != ClassAdditive {
+		t.Errorf("highest class should be additive, got %v", d.HighestClass())
+	}
+}
+
+// TestDiff_FieldRemoved_OwnedWithCrossRef_IsBreaking: when another caller
+// references the removed field, the removal stays breaking.
+func TestDiff_FieldRemoved_OwnedWithCrossRef_IsBreaking(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  brand text }`)
+	newIR := lower(t, `entity A in x { id bigint primary }`)
+
+	ownership := map[string]string{"x.A": "vendor"}
+	refs := map[string]bool{"x.A.brand": true} // consumer references brand
+	d := ComputeDiff(oldIR, newIR, WithCallerContext("vendor", ownership, refs))
+
+	c := findChange(t, d, KindFieldRemoved)
+	if c == nil {
+		t.Fatal("expected KindFieldRemoved change")
+	}
+	if c.Class != ClassCrossCallerBreaking {
+		t.Errorf("field removal with cross-caller ref should be breaking, got %v", c.Class)
+	}
+}
+
+// TestDiff_FieldRemoved_NotOwner_IsBreaking: when the submitting caller
+// does not own the entity, the removal is breaking regardless of refs.
+func TestDiff_FieldRemoved_NotOwner_IsBreaking(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  brand text }`)
+	newIR := lower(t, `entity A in x { id bigint primary }`)
+
+	ownership := map[string]string{"x.A": "other-caller"}
+	refs := map[string]bool{}
+	d := ComputeDiff(oldIR, newIR, WithCallerContext("vendor", ownership, refs))
+
+	c := findChange(t, d, KindFieldRemoved)
+	if c == nil {
+		t.Fatal("expected KindFieldRemoved change")
+	}
+	if c.Class != ClassCrossCallerBreaking {
+		t.Errorf("field removal by non-owner should be breaking, got %v", c.Class)
+	}
+}
+
+// TestDiff_EntityRemoved_OwnedNoCrossRef_IsAdditive: dropping an entity
+// the submitting caller owns, with no cross-caller references, is additive.
+func TestDiff_EntityRemoved_OwnedNoCrossRef_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary } entity B in x { id bigint primary }`)
+	newIR := lower(t, `entity A in x { id bigint primary }`)
+
+	ownership := map[string]string{"x.A": "vendor", "x.B": "vendor"}
+	refs := map[string]bool{}
+	d := ComputeDiff(oldIR, newIR, WithCallerContext("vendor", ownership, refs))
+
+	c := findChange(t, d, KindEntityRemoved)
+	if c == nil {
+		t.Fatal("expected KindEntityRemoved change")
+	}
+	if c.Class != ClassAdditive {
+		t.Errorf("entity removal by owner with no cross-refs should be additive, got %v", c.Class)
+	}
+}
+
+// TestDiff_EntityRemoved_CrossRef_IsBreaking: dropping an entity another
+// caller references stays breaking.
+func TestDiff_EntityRemoved_CrossRef_IsBreaking(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary } entity B in x { id bigint primary }`)
+	newIR := lower(t, `entity A in x { id bigint primary }`)
+
+	ownership := map[string]string{"x.A": "vendor", "x.B": "vendor"}
+	refs := map[string]bool{"x.B": true} // consumer references entity B
+	d := ComputeDiff(oldIR, newIR, WithCallerContext("vendor", ownership, refs))
+
+	c := findChange(t, d, KindEntityRemoved)
+	if c == nil {
+		t.Fatal("expected KindEntityRemoved change")
+	}
+	if c.Class != ClassCrossCallerBreaking {
+		t.Errorf("entity removal with cross-caller ref should be breaking, got %v", c.Class)
+	}
+}
+
+// TestDiff_NoCallerContext_DefaultBreaking: without caller context (the
+// backward-compatible default), all removals are breaking.
+func TestDiff_NoCallerContext_DefaultBreaking(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  brand text }`)
+	newIR := lower(t, `entity A in x { id bigint primary }`)
+
+	// No WithCallerContext option — old behavior.
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldRemoved)
+	if c == nil {
+		t.Fatal("expected KindFieldRemoved change")
+	}
+	if c.Class != ClassCrossCallerBreaking {
+		t.Errorf("without caller context, field removal should be breaking, got %v", c.Class)
+	}
+}

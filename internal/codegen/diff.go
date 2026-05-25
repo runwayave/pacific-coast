@@ -136,12 +136,63 @@ func (d *Diff) HighestClass() ChangeClass {
 	return ClassAdditive
 }
 
+// diffCtx carries optional caller-ownership context into the diff engine.
+// When populated, removals of entities/fields owned exclusively by the
+// submitting caller (with no cross-caller references) are downgraded from
+// ClassCrossCallerBreaking to ClassAdditive.
+type diffCtx struct {
+	submittingCaller string
+	entityOwnership  map[string]string // entityID → caller who declared it
+	crossCallerRefs  map[string]bool   // "entityID" or "entityID.fieldName" → referenced by another caller
+}
+
+// DiffOption configures optional behavior of ComputeDiff.
+type DiffOption func(*diffCtx)
+
+// WithCallerContext supplies per-caller ownership and cross-reference data
+// so the diff engine can downgrade removals that only affect the submitting
+// caller from ClassCrossCallerBreaking to ClassAdditive.
+func WithCallerContext(caller string, ownership map[string]string, refs map[string]bool) DiffOption {
+	return func(c *diffCtx) {
+		c.submittingCaller = caller
+		c.entityOwnership = ownership
+		c.crossCallerRefs = refs
+	}
+}
+
+// classifyRemoval returns ClassAdditive when the submitting caller owns the
+// entity and no other caller references the given key (entityID or
+// entityID.field). Falls back to ClassCrossCallerBreaking when context is
+// absent or conditions aren't met.
+func (ctx *diffCtx) classifyRemoval(entityID, refKey string) ChangeClass {
+	if ctx.submittingCaller == "" {
+		return ClassCrossCallerBreaking
+	}
+	owner, ok := ctx.entityOwnership[entityID]
+	if !ok || owner != ctx.submittingCaller {
+		return ClassCrossCallerBreaking
+	}
+	if ctx.crossCallerRefs[refKey] {
+		return ClassCrossCallerBreaking
+	}
+	return ClassAdditive
+}
+
 // ComputeDiff diffs old → new. Either IR may be nil; nil means "no schema yet".
 //
 // Determinism: the returned change order is stable (entities sorted by ID,
 // fields by name within each entity, then index/cache changes), which is
 // important because the SQL emitter and tests depend on it.
-func ComputeDiff(oldIR, newIR *dsl.IR) *Diff {
+//
+// The variadic opts parameter accepts DiffOption values. When no options are
+// supplied, the engine uses the conservative default: every removal is
+// classified ClassCrossCallerBreaking.
+func ComputeDiff(oldIR, newIR *dsl.IR, opts ...DiffOption) *Diff {
+	ctx := &diffCtx{}
+	for _, o := range opts {
+		o(ctx)
+	}
+
 	d := &Diff{}
 	oldByID := indexByID(oldIR)
 	newByID := indexByID(newIR)
@@ -168,13 +219,14 @@ func ComputeDiff(oldIR, newIR *dsl.IR) *Diff {
 		newE, hasNew := newByID[id]
 		switch {
 		case hasOld && !hasNew:
-			// Entity removed — breaking. Even if no caller reads it, dropping it
-			// can break the in-flight queries from a caller pinned to an older
-			// BSR version. The Admin service may downgrade based on consumer
-			// impact, but the diff engine's job is to flag the worst case.
-			d.Breaking = append(d.Breaking, Change{
+			// Entity removed. When caller context is available and the
+			// submitting caller owns this entity with no cross-caller
+			// references, this is safe to auto-apply. Otherwise flag as
+			// cross-caller-breaking (the conservative default).
+			class := ctx.classifyRemoval(id, id)
+			d.append(Change{
 				Kind:     KindEntityRemoved,
-				Class:    ClassCrossCallerBreaking,
+				Class:    class,
 				EntityID: id,
 				Detail:   "entity removed",
 				From:     oldE,
@@ -188,7 +240,7 @@ func ComputeDiff(oldIR, newIR *dsl.IR) *Diff {
 				To:       newE,
 			})
 		default:
-			diffEntity(oldE, newE, d)
+			diffEntity(oldE, newE, d, ctx)
 		}
 	}
 	return d
@@ -196,9 +248,9 @@ func ComputeDiff(oldIR, newIR *dsl.IR) *Diff {
 
 // ---- per-entity diffs ----
 
-func diffEntity(oldE, newE *dsl.Entity, d *Diff) {
+func diffEntity(oldE, newE *dsl.Entity, d *Diff, ctx *diffCtx) {
 	diffTableName(oldE, newE, d)
-	diffFields(oldE, newE, d)
+	diffFields(oldE, newE, d, ctx)
 	diffIndexes(oldE, newE, d)
 	diffCache(oldE, newE, d)
 	diffQueryTimeout(oldE, newE, d)
@@ -222,7 +274,7 @@ func diffTableName(oldE, newE *dsl.Entity, d *Diff) {
 	})
 }
 
-func diffFields(oldE, newE *dsl.Entity, d *Diff) {
+func diffFields(oldE, newE *dsl.Entity, d *Diff, ctx *diffCtx) {
 	oldFields := fieldsByName(oldE)
 	newFields := fieldsByName(newE)
 
@@ -232,10 +284,15 @@ func diffFields(oldE, newE *dsl.Entity, d *Diff) {
 		nf, hasNew := newFields[name]
 		switch {
 		case hasOld && !hasNew:
-			d.Breaking = append(d.Breaking, Change{
+			// Field removed. Check whether the owning caller is the
+			// submitter and no other caller references this field.
+			entityID := newE.ID()
+			refKey := entityID + "." + name
+			class := ctx.classifyRemoval(entityID, refKey)
+			d.append(Change{
 				Kind:     KindFieldRemoved,
-				Class:    ClassCrossCallerBreaking,
-				EntityID: newE.ID(),
+				Class:    class,
+				EntityID: entityID,
 				Field:    name,
 				Detail:   "field removed",
 				From:     of,
