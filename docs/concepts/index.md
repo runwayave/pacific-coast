@@ -1,9 +1,10 @@
 # Concepts
 
-Five concepts before writing `.atl` files. Start with [Schema as code](schema-as-code.md); the rest reference it.
+Core concepts before writing `.atl` files. Start with [Schema as code](schema-as-code.md); the rest reference it.
 
 - [Schema as code](schema-as-code.md). `.atl` syntax and the SQL, gRPC, and clients derived from it.
 - [The typed query surface](the-typed-query-surface.md). The `Get`/`Create`/`Update`/`Delete`/`Query` methods generated per entity.
+- [Schema versioning](schema-versioning.md). Append-only version registry, structural diffs, per-field blame.
 - [Caching and invalidation](caching-and-invalidation.md). Declaring read-through cache in `.atl` and how writes invalidate it.
 - [Ephemeral data](ephemeral-data.md). Memcached-only typed data with TTL for short-lived scratch state.
 - [Jobs and workflows](jobs-and-workflows.md). Typed background work: retries, DLQ, checkpointing, multi-step orchestration with compensation.

@@ -34,9 +34,9 @@ job ShopifyImport in vendor {
 tidectl codegen --workspace=atlantis.dev.yaml
 ```
 
-This emits `gen/go/server/<ns>/jobs.go` with:
+This emits `gen/go/server/<ns>/jobs.go` (the `vendor` namespace becomes the `vendorpkg` Go package to avoid colliding with Go's `vendor/` directory convention) with:
 
-- `ShopifyImportArgs` struct (typed, json-tagged).
+- `ShopifyImportArgs` struct (typed, json-tagged). Field names are PascalCase in Go (the snake_case names in `.atl` are converted automatically).
 - `ShopifyImportHandler` interface (`Handle(ctx, args) error`).
 - `ShopifyImportJobName` const (`"vendor.ShopifyImport"`).
 - `RegisterShopifyImport(reg, handler)` helper.
@@ -51,12 +51,13 @@ type shopifyImportHandler struct {
 }
 
 func (h *shopifyImportHandler) Handle(ctx context.Context, args vendorpkg.ShopifyImportArgs) error {
-    // Report progress for long-running imports.
+    // Checkpoint(ctx, progressPercent, message) — reports progress
+    // visible in `tide job status`. Best-effort; does not fail the job.
     jobs.Checkpoint(ctx, 10, "fetching catalog")
 
     products, err := h.client.FetchProducts(ctx, args.VendorId)
     if err != nil {
-        return err // worker retries up to max_retries, then DLQs
+        return err // worker retries up to the declared retries limit, then DLQs
     }
 
     jobs.Checkpoint(ctx, 80, "importing products")
@@ -73,7 +74,7 @@ In `cmd/server/main.go` (or your fork's equivalent):
 ```go
 reg := jobs.NewRegistry()
 vendorpkg.RegisterShopifyImport(reg, &shopifyImportHandler{client: shopifyClient})
-// pass reg to the worker pool
+// pass reg to the worker (see "In-process worker pattern" below)
 ```
 
 ## 5. Apply the schema
@@ -130,6 +131,52 @@ procedure ConfirmOrder for vendor.Order {
 
 The job row shares the procedure's tx. If the procedure rolls back, the job is never enqueued.
 
+## In-process worker pattern
+
+The job handler runs inside your application binary, not inside the atlantis server. See [Jobs and workflows](../concepts/jobs-and-workflows.md) for the conceptual model. In short: atlantis stores jobs and workers pull them via `FOR UPDATE SKIP LOCKED`; the handler code runs in the app process that owns the business logic.
+
+```go
+package main
+
+import (
+    "context"
+    "log/slog"
+    "net/http"
+    "time"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/rachitkumar205/atlantis-go/jobs"
+    vendorpkg "gen/go/server/vendor"
+)
+
+func main() {
+    ctx := context.Background()
+    shopifyClient := shopify.NewClient(/* ... */)
+
+    // Connect to the atlantis database.
+    pool, _ := pgxpool.New(ctx, pgURL)
+
+    // Build the job registry and register handlers.
+    registry := jobs.NewRegistry()
+    vendorpkg.RegisterShopifyImport(registry, &shopifyImportHandler{client: shopifyClient})
+
+    // Start the worker. It polls the atlantis job queue,
+    // claims rows, and calls the matching handler.
+    w := jobs.NewWorker(pool, registry, "shopify", jobs.Config{
+        Schema:        "atlantis",
+        DrainInterval: time.Second,
+        BatchSize:     10,
+        Logger:        slog.Default(),
+    })
+    go w.Run(ctx)
+
+    // Start the HTTP server in the same binary.
+    http.ListenAndServe(":8080", router)
+}
+```
+
+If a handler returns an error, the worker marks the job for retry (up to the declared `retries` limit) or moves it to the dead-letter queue. Scale workers by scaling app replicas — multiple workers on the same queue coordinate via `SKIP LOCKED`.
+
 ## Common errors
 
 - `unknown job "vendor.ShopifyImport"` — run `tide apply` to record the declaration into the IR checkpoint.
@@ -138,6 +185,6 @@ The job row shares the procedure's tx. If the procedure rolls back, the job is n
 
 ## Related
 
-- [Jobs and workflows concept](../concepts/jobs-and-workflows.md). How the runtime works under the hood.
-- [Row-level TTL](row-ttl.md). Automatic expiry using the job runtime's built-in sweeper.
-- [Local development](local-development.md). Running atlantis locally with `tidectl dev`.
+- [Jobs and workflows](../concepts/jobs-and-workflows.md) — how the runtime works under the hood
+- [Row-level TTL](row-ttl.md) — automatic expiry using the job runtime's built-in sweeper
+- [Local development](local-development.md) — running atlantis locally with `tidectl dev`
