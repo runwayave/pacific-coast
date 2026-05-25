@@ -653,12 +653,6 @@ func entitySchema(e *dsl.Entity) string {
 	return schema.EntitySchema(e)
 }
 
-// entityPhysicalTable returns just the bare table name.
-// Delegates to the shared schema package.
-func entityPhysicalTable(e *dsl.Entity) string {
-	return schema.EntityPhysicalTable(e)
-}
-
 // quoteIdent wraps a SQL identifier in double quotes.
 // Delegates to the shared schema package.
 func quoteIdent(s string) string {
