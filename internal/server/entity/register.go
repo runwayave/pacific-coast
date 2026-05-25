@@ -2,9 +2,9 @@ package entity
 
 import (
 	"fmt"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
@@ -13,137 +13,117 @@ import (
 
 // Server is the dynamic entity server that reads the DSL IR at startup
 // and serves every entity's CRUD RPCs without compiled proto stubs.
+// Handlers load metadata from the current snapshot at each request,
+// enabling hot-reload via atomic pointer swap.
 type Server struct {
 	pool       runtime.Pool
 	cache      runtime.Cache
 	outbox     runtime.Outbox
 	queryCache *queryresult.Cache
-	entities   map[string]*entityMeta
+	snapshot   atomic.Pointer[entitySnapshot]
 }
 
 // NewServer constructs a dynamic entity server.
 func NewServer(pool runtime.Pool, cache runtime.Cache, outbox runtime.Outbox, qc *queryresult.Cache) *Server {
-	return &Server{
+	s := &Server{
 		pool:       pool,
 		cache:      cache,
 		outbox:     outbox,
 		queryCache: qc,
-		entities:   make(map[string]*entityMeta),
 	}
+	s.snapshot.Store(&entitySnapshot{
+		entities:   make(map[string]*entityMeta),
+		customMeta: make(map[string]*customQueryMeta),
+	})
+	return s
 }
 
-// Register reads the IR and registers one gRPC service per entity
-// (Get, Create, Update, Delete, BatchGet, Query) plus per-namespace
+// Register reads the IR, builds the initial entity snapshot, and
+// registers one gRPC service per entity plus per-namespace
 // CustomService descriptors for custom queries.
 func (s *Server) Register(grpcSrv *grpc.Server, ir *dsl.IR) error {
 	if ir == nil {
 		return fmt.Errorf("entity.Register: nil IR")
 	}
 
-	for i := range ir.Entities {
-		e := &ir.Entities[i]
-		meta := buildEntityMeta(e, ir)
-
-		fd, err := buildProtoDescriptors(e)
-		if err != nil {
-			return fmt.Errorf("entity %s: %w", e.ID(), err)
-		}
-		resolveProtoDescriptors(meta, fd)
-
-		// Sanity: every critical descriptor must be present.
-		if meta.msgDesc == nil {
-			return fmt.Errorf("entity %s: entity message descriptor not built", e.ID())
-		}
-		if meta.getRequestDesc == nil {
-			return fmt.Errorf("entity %s: GetRequest descriptor not built", e.ID())
-		}
-
-		s.entities[e.ID()] = meta
+	snap, err := buildSnapshot(ir, "")
+	if err != nil {
+		return err
 	}
+	s.snapshot.Store(snap)
 
-	// Register one gRPC service per entity.
-	for _, meta := range s.entities {
+	for _, meta := range snap.entities {
 		desc := buildGRPCServiceDesc(s, meta)
-		grpcSrv.RegisterService(&desc, s)
+		grpcSrv.RegisterService(&desc, nil)
 	}
 
-	// Register custom query services (one per namespace).
 	if len(ir.Queries) > 0 {
-		if err := s.registerCustomServices(grpcSrv, ir); err != nil {
-			return err
-		}
+		s.registerCustomServices(grpcSrv, snap)
 	}
 
 	return nil
 }
 
+// Reload builds a new snapshot from the IR and swaps it atomically.
+// In-flight requests on the old snapshot complete unaffected.
+func (s *Server) Reload(ir *dsl.IR, contentHash string) error {
+	snap, err := buildSnapshot(ir, contentHash)
+	if err != nil {
+		return fmt.Errorf("entity.Reload: %w", err)
+	}
+	s.snapshot.Store(snap)
+	return nil
+}
+
+// ContentHash returns the content hash of the currently loaded snapshot.
+func (s *Server) ContentHash() string {
+	snap := s.snapshot.Load()
+	if snap == nil {
+		return ""
+	}
+	return snap.contentHash
+}
+
 // buildGRPCServiceDesc constructs the grpc.ServiceDesc for one entity.
-// It uses the same service name as the compiled proto stubs so callers
-// (which send compiled proto messages) connect to the same endpoints.
+// Handlers capture the entity ID and look up metadata from the current
+// snapshot at request time, enabling hot-reload.
 func buildGRPCServiceDesc(s *Server, meta *entityMeta) grpc.ServiceDesc {
 	ns := goNamespace(meta.entity.Namespace)
-	serviceName := fmt.Sprintf("atlantis.%s.v1.%sService", ns, meta.entity.Name)
+	entityID := meta.entityID
+	name := meta.entity.Name
+	serviceName := fmt.Sprintf("atlantis.%s.v1.%sService", ns, name)
 
 	methods := []grpc.MethodDesc{
-		{MethodName: "Get" + meta.entity.Name, Handler: makeHandler(s, meta, "Get")},
-		{MethodName: "Create" + meta.entity.Name, Handler: makeHandler(s, meta, "Create")},
-		{MethodName: "Update" + meta.entity.Name, Handler: makeHandler(s, meta, "Update")},
-		{MethodName: "Delete" + meta.entity.Name, Handler: makeHandler(s, meta, "Delete")},
-		{MethodName: "BatchGet" + meta.entity.Name, Handler: makeHandler(s, meta, "BatchGet")},
-		{MethodName: "Query" + meta.entity.Name, Handler: makeHandler(s, meta, "Query")},
+		{MethodName: "Get" + name, Handler: makeHandler(s, entityID, "Get", ns, name)},
+		{MethodName: "Create" + name, Handler: makeHandler(s, entityID, "Create", ns, name)},
+		{MethodName: "Update" + name, Handler: makeHandler(s, entityID, "Update", ns, name)},
+		{MethodName: "Delete" + name, Handler: makeHandler(s, entityID, "Delete", ns, name)},
+		{MethodName: "BatchGet" + name, Handler: makeHandler(s, entityID, "BatchGet", ns, name)},
+		{MethodName: "Query" + name, Handler: makeHandler(s, entityID, "Query", ns, name)},
 	}
 
 	return grpc.ServiceDesc{
 		ServiceName: serviceName,
-		HandlerType: nil, // dynamic; no typed interface to check
+		HandlerType: nil,
 		Methods:     methods,
 		Streams:     []grpc.StreamDesc{},
-		Metadata:    fmt.Sprintf("atlantis/%s/v1/%s.proto", ns, meta.entity.Name),
+		Metadata:    fmt.Sprintf("atlantis/%s/v1/%s.proto", ns, name),
 	}
 }
 
-func (s *Server) registerCustomServices(grpcSrv *grpc.Server, ir *dsl.IR) error {
+// registerCustomServices registers one gRPC CustomService per namespace
+// from the pre-built snapshot. Handlers capture the query key and look
+// up metadata from the current snapshot at request time.
+func (s *Server) registerCustomServices(grpcSrv *grpc.Server, snap *entitySnapshot) {
 	type nsGroup struct {
 		ns      string
 		methods []grpc.MethodDesc
 	}
 	groups := make(map[string]*nsGroup)
 
-	for i := range ir.Queries {
-		cq := &ir.Queries[i]
-		parts := splitEntityID(cq.Owner)
+	for key, cqm := range snap.customMeta {
+		parts := splitEntityID(cqm.query.Owner)
 		ns := parts[0]
-
-		cqm := &customQueryMeta{
-			query:     cq,
-			sql:       cq.SQL,
-			inputCols: cq.Inputs,
-			timeoutMS: 2000,
-		}
-
-		if cq.Output.AsEntityID != "" {
-			cqm.asEntity = true
-			if em, ok := s.entities[cq.Output.AsEntityID]; ok {
-				cqm.entityMeta = em
-			}
-		} else {
-			cqm.outputCols = cq.Output.Columns
-		}
-
-		// Build proto descriptors for this custom query.
-		fd, err := buildCustomQueryDescs(cq, ns)
-		if err != nil {
-			return fmt.Errorf("custom query %s: %w", cq.Name, err)
-		}
-
-		cqm.requestDesc = fd.Messages().ByName(protoreflect.Name(cq.Name + "Request"))
-		cqm.responseDesc = fd.Messages().ByName(protoreflect.Name(cq.Name + "Response"))
-
-		// For column-output queries, find the nested Row message.
-		if len(cq.Output.Columns) > 0 && cqm.responseDesc != nil {
-			rowName := protoreflect.Name(cq.Name + "Response_Row")
-			cqm.rowDesc = cqm.responseDesc.Messages().ByName(rowName)
-		}
 
 		g, ok := groups[ns]
 		if !ok {
@@ -151,8 +131,8 @@ func (s *Server) registerCustomServices(grpcSrv *grpc.Server, ir *dsl.IR) error 
 			groups[ns] = g
 		}
 		g.methods = append(g.methods, grpc.MethodDesc{
-			MethodName: cq.Name,
-			Handler:    makeCustomHandler(s, cqm, ns),
+			MethodName: cqm.query.Name,
+			Handler:    makeCustomHandler(s, key, ns),
 		})
 	}
 
@@ -165,8 +145,6 @@ func (s *Server) registerCustomServices(grpcSrv *grpc.Server, ir *dsl.IR) error 
 			Streams:     []grpc.StreamDesc{},
 			Metadata:    fmt.Sprintf("atlantis/%s/v1/custom.proto", goNS),
 		}
-		grpcSrv.RegisterService(&desc, s)
+		grpcSrv.RegisterService(&desc, nil)
 	}
-
-	return nil
 }

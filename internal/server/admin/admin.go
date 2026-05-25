@@ -89,6 +89,10 @@ type PlanResponse struct {
 	ParseErrors    []string
 	BreakingDetail []string
 
+	// CheckpointHash is the content hash of the IR checkpoint at plan time.
+	// Sent back in ApplyRequest for CAS conflict detection.
+	CheckpointHash string
+
 	// CustomSQLErrors lists pg_query_go validation failures for query/procedure blocks.
 	// Empty if all custom SQL validates.
 	CustomSQLErrors []string
@@ -132,16 +136,18 @@ type ImpactEntry struct {
 
 // ApplyRequest is the input to ApplyMigration.
 type ApplyRequest struct {
-	Caller string
-	PlanID string
-	UpSQL  string // re-submitted by caller to detect drift since planning
-	Files  []SubmittedFile
+	Caller         string
+	PlanID         string
+	UpSQL          string // re-submitted by caller to detect drift since planning
+	Files          []SubmittedFile
+	CheckpointHash string // CAS token from PlanResponse; empty for pre-CAS clients
 }
 
 // ApplyResponse is returned on a successful apply.
 type ApplyResponse struct {
-	AppliedAt string
-	Version   int64
+	AppliedAt   string
+	Version     int64
+	ContentHash string // sha256 of the new IR checkpoint
 }
 
 // GetMergedSchemaRequest asks for the union of every caller's registered files.
@@ -240,6 +246,7 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 		UpSQL:           scripts.Up,
 		DownSQL:         scripts.Down,
 		ImpactReport:    buildImpactReport(req.Caller, others, d, newIR),
+		CheckpointHash:  s.loadCheckpointHash(ctx),
 		CustomSQLErrors: customSQLErrs,
 		CustomCount: CustomDeclCount{
 			Queries:    len(newIR.Queries),
@@ -389,33 +396,41 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 		return nil, fmt.Errorf("apply: %w", err)
 	}
 
+	// Use client-provided hash when available (what they planned against);
+	// fall back to reading it server-side inside the advisory-locked tx.
+	expectedHash := req.CheckpointHash
+	if expectedHash == "" {
+		expectedHash, _ = loadCheckpointHashTx(ctx, tx)
+	}
 	meta := versionMeta{
-		Caller:    req.Caller,
-		PlanClass: d.HighestClass().String(),
-		Diff:      d,
-		UpSQL:     scripts.Up,
-		DownSQL:   scripts.Down,
-		PlanID:    gotPlanID,
-		EventType: "apply",
+		Caller:       req.Caller,
+		PlanClass:    d.HighestClass().String(),
+		Diff:         d,
+		UpSQL:        scripts.Up,
+		DownSQL:      scripts.Down,
+		PlanID:       gotPlanID,
+		EventType:    "apply",
+		ExpectedHash: expectedHash,
 	}
 	version, err := s.persistCheckpoint(ctx, tx, newIR, meta)
 	if err != nil {
 		return nil, err
 	}
 
+	// Read the newly written content hash for the response.
+	newHash, _ := loadCheckpointHashTx(ctx, tx)
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 
-	// Mirror after commit; the DB is authoritative. Failed writes are logged; the next apply retries.
 	if s.mirrorEnabled {
 		if err := mirrorFiles(s.mirrorDir, req.Caller, req.Files); err != nil {
-			// TODO: route through a structured logger once Service carries one.
 			fmt.Fprintf(os.Stderr, "admin: mirror after apply (caller=%s): %v\n", req.Caller, err)
 		}
 	}
 
-	return &ApplyResponse{AppliedAt: nowUTC(), Version: version}, nil
+	return &ApplyResponse{AppliedAt: nowUTC(), Version: version, ContentHash: newHash}, nil
 }
 
 // mirrorFiles writes each file atomically to <root>/<caller>/<path>.
@@ -646,19 +661,29 @@ func (s *Service) loadCheckpointTx(ctx context.Context, tx pgx.Tx) (*dsl.IR, err
 	return dsl.DecodeJSONIR(raw)
 }
 
+func (s *Service) loadCheckpointHash(ctx context.Context) string {
+	var hash string
+	err := s.pool.QueryRow(ctx, `SELECT content_hash FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&hash)
+	if err != nil {
+		return ""
+	}
+	return hash
+}
+
 // versionMeta holds the metadata for one schema_versions row. Passed to
 // persistCheckpoint so the caller can supply the diff, SQL, plan ID, and
 // event type without persistCheckpoint needing to know how they were
 // produced.
 type versionMeta struct {
-	Caller    string
-	PlanClass string
-	Diff      *codegen.Diff
-	UpSQL     string
-	DownSQL   string
-	PlanID    string
-	EventType string // "apply", "rollback", "adopt"
-	ParentVer *int64
+	Caller       string
+	PlanClass    string
+	Diff         *codegen.Diff
+	UpSQL        string
+	DownSQL      string
+	PlanID       string
+	EventType    string // "apply", "rollback", "adopt"
+	ParentVer    *int64
+	ExpectedHash string // CAS token — if set, reject when current checkpoint hash differs
 }
 
 func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, meta versionMeta) (int64, error) {
@@ -667,16 +692,30 @@ func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, 
 		return 0, err
 	}
 
-	// Existing ir_checkpoint upsert — the authoritative "current IR" row.
+	h := sha256.Sum256(raw)
+	irHash := hex.EncodeToString(h[:])
+
+	// CAS: reject if the checkpoint has moved since the caller planned.
+	if meta.ExpectedHash != "" {
+		got, err := loadCheckpointHashTx(ctx, tx)
+		if err != nil {
+			return 0, fmt.Errorf("cas: %w", err)
+		}
+		if got != "" && got != meta.ExpectedHash {
+			return 0, fmt.Errorf("admin: checkpoint has moved (expected %s, got %s) — re-plan and retry",
+				meta.ExpectedHash[:min(12, len(meta.ExpectedHash))],
+				got[:min(12, len(got))])
+		}
+	}
+
 	_, err = tx.Exec(ctx, `
-INSERT INTO atlantis.ir_checkpoint (id, ir, applied_by) VALUES (1, $1, $2)
-ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by = EXCLUDED.applied_by`,
-		raw, meta.Caller)
+INSERT INTO atlantis.ir_checkpoint (id, ir, applied_by, content_hash) VALUES (1, $1, $2, $3)
+ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by = EXCLUDED.applied_by, content_hash = EXCLUDED.content_hash`,
+		raw, meta.Caller, irHash)
 	if err != nil {
 		return 0, fmt.Errorf("upsert ir_checkpoint: %w", err)
 	}
 
-	// Serialize diff to JSON; nil diff becomes an empty object.
 	var diffJSON []byte
 	if meta.Diff != nil {
 		diffJSON, err = json.Marshal(meta.Diff)
@@ -687,11 +726,6 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by 
 		diffJSON = []byte(`{"additive":[],"backfill_required":[],"breaking":[]}`)
 	}
 
-	// ir_hash = sha256 of the canonical IR JSON.
-	h := sha256.Sum256(raw)
-	irHash := hex.EncodeToString(h[:])
-
-	// Insert versioned row and return the auto-generated version number.
 	var version int64
 	err = tx.QueryRow(ctx, `
 INSERT INTO atlantis.schema_versions
@@ -710,6 +744,20 @@ RETURNING version`,
 	}
 
 	return version, nil
+}
+
+// loadCheckpointHashTx reads the current content hash from ir_checkpoint
+// within an existing transaction. Returns "" if no checkpoint exists.
+func loadCheckpointHashTx(ctx context.Context, tx pgx.Tx) (string, error) {
+	var hash string
+	err := tx.QueryRow(ctx, `SELECT content_hash FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&hash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return hash, nil
 }
 
 // computePlanID hashes (caller, files, prior checkpoint hash) so applies can

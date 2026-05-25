@@ -39,10 +39,8 @@ type planResponse struct {
 	ImpactReport   []impactEntry `json:"ImpactReport"`
 	ParseErrors    []string      `json:"ParseErrors"`
 	BreakingDetail []string      `json:"BreakingDetail"`
+	CheckpointHash string        `json:"CheckpointHash,omitempty"`
 
-	// Phase-split scripts + field driver list. Populated when the plan
-	// contains a backfill-required change with a declared `backfill`
-	// modifier; consumed by `tide apply --backfill` to drive BeginBackfillPlan.
 	PreBackfillUpSQL       string             `json:"PreBackfillUpSQL,omitempty"`
 	PreBackfillIndexesSQL  string             `json:"PreBackfillIndexesSQL,omitempty"`
 	PostBackfillUpSQL      string             `json:"PostBackfillUpSQL,omitempty"`
@@ -78,14 +76,16 @@ type beginBackfillResponse struct {
 }
 
 type applyRequest struct {
-	Caller string          `json:"Caller"`
-	PlanID string          `json:"PlanID"`
-	UpSQL  string          `json:"UpSQL"`
-	Files  []SubmittedFile `json:"Files"`
+	Caller         string          `json:"Caller"`
+	PlanID         string          `json:"PlanID"`
+	UpSQL          string          `json:"UpSQL"`
+	Files          []SubmittedFile `json:"Files"`
+	CheckpointHash string          `json:"CheckpointHash,omitempty"`
 }
 
 type applyResponse struct {
-	AppliedAt string `json:"AppliedAt"`
+	AppliedAt   string `json:"AppliedAt"`
+	ContentHash string `json:"ContentHash,omitempty"`
 }
 
 // Exit codes:
@@ -262,16 +262,20 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan pla
 	var applyResp applyResponse
 	err := client.invoke(ctx, "/atlantis.admin.v1.Admin/ApplyMigration",
 		applyRequest{
-			Caller: cfg.Caller,
-			PlanID: plan.PlanID,
-			UpSQL:  plan.UpSQL,
-			Files:  files,
+			Caller:         cfg.Caller,
+			PlanID:         plan.PlanID,
+			UpSQL:          plan.UpSQL,
+			Files:          files,
+			CheckpointHash: plan.CheckpointHash,
 		}, &applyResp)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide apply:", err)
 		return 3
 	}
 	cliout.Successf("applied at %s", applyResp.AppliedAt)
+	if applyResp.ContentHash != "" {
+		fmt.Printf("  %s %s\n", cliout.Grey("content hash:"), applyResp.ContentHash[:12])
+	}
 	if cfg.OutputDir != "" {
 		cliout.Infof("regenerate the typed client under %s with `buf generate` (v0.2 will run this automatically)", cfg.OutputDir)
 	}

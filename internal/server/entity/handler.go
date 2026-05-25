@@ -37,11 +37,18 @@ func (s *Server) dispatch(ctx context.Context, meta *entityMeta, op string, dec 
 }
 
 // makeHandler returns a grpc.MethodDesc.Handler for one RPC method.
-func makeHandler(s *Server, meta *entityMeta, op string) func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-	ns := goNamespace(meta.entity.Namespace)
-	fullMethod := fmt.Sprintf("/atlantis.%s.v1.%sService/%s%s", ns, meta.entity.Name, op, meta.entity.Name)
+// It captures the entity ID (immutable string) rather than a pointer
+// to entityMeta, and loads the current metadata from the snapshot at
+// each request. This allows the snapshot to be swapped for hot-reload.
+func makeHandler(s *Server, entityID string, op string, ns string, name string) func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	fullMethod := fmt.Sprintf("/atlantis.%s.v1.%sService/%s%s", ns, name, op, name)
 
 	return func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+		snap := s.snapshot.Load()
+		meta, ok := snap.entities[entityID]
+		if !ok {
+			return nil, status.Errorf(codes.NotFound, "entity %s not found in current schema", entityID)
+		}
 		if interceptor == nil {
 			return s.dispatch(ctx, meta, op, dec)
 		}

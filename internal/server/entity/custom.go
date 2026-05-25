@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -155,12 +157,24 @@ func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDes
 	return fd, nil
 }
 
-func makeCustomHandler(s *Server, cqm *customQueryMeta, ns string) func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+// makeCustomHandler captures the query key (ns:name) and looks up the
+// customQueryMeta from the current snapshot at each request.
+func makeCustomHandler(s *Server, queryKey string, ns string) func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
 	goNS := goNamespace(ns)
-	fullMethod := fmt.Sprintf("/atlantis.%s.v1.CustomService/%s", goNS, cqm.query.Name)
+	// Extract query name from key (format: "ns:queryName").
+	queryName := queryKey
+	if idx := len(ns) + 1; idx < len(queryKey) {
+		queryName = queryKey[idx:]
+	}
+	fullMethod := fmt.Sprintf("/atlantis.%s.v1.CustomService/%s", goNS, queryName)
 
 	return func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-		// First decode the request so we can extract input args.
+		snap := s.snapshot.Load()
+		cqm, ok := snap.customMeta[queryKey]
+		if !ok {
+			return nil, status.Errorf(codes.NotFound, "custom query %s not found in current schema", queryKey)
+		}
+
 		req := dynamicpb.NewMessage(cqm.requestDesc)
 		if err := dec(req); err != nil {
 			return nil, err

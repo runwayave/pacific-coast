@@ -412,16 +412,17 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.ToVers
 		}
 	}
 
-	// Persist checkpoint with rollback metadata.
+	checkpointHash, _ := loadCheckpointHashTx(ctx, tx)
 	parentVer := req.ToVersion
 	version, err := s.persistCheckpoint(ctx, tx, targetIR, versionMeta{
-		Caller:    req.Caller,
-		PlanClass: d.HighestClass().String(),
-		Diff:      d,
-		UpSQL:     scripts.Up,
-		DownSQL:   scripts.Down,
-		EventType: "rollback",
-		ParentVer: &parentVer,
+		Caller:       req.Caller,
+		PlanClass:    d.HighestClass().String(),
+		Diff:         d,
+		UpSQL:        scripts.Up,
+		DownSQL:      scripts.Down,
+		EventType:    "rollback",
+		ParentVer:    &parentVer,
+		ExpectedHash: checkpointHash,
 	})
 	if err != nil {
 		return nil, err

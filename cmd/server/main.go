@@ -43,7 +43,7 @@ func main() {
 	cfg, err := loadConfig()
 	if err != nil {
 		// Use stderr directly — the logger isn't built yet.
-		os.Stderr.WriteString("config: " + err.Error() + "\n")
+		_, _ = os.Stderr.WriteString("config: " + err.Error() + "\n")
 		os.Exit(2)
 	}
 
@@ -107,7 +107,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer mc.Close()
+	defer func() { _ = mc.Close() }()
 	log.Info("memcached client ready", "addrs", cfg.MemcachedAddrs)
 
 	reader, err := read.New(mc, read.Config{
@@ -293,9 +293,12 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	_ = jobsRegistry // exported via Server.JobsRegistry once PR-C wires the public surface
 
 	log.Debug("init: load IR checkpoint")
-	ir, err := loadIRCheckpoint(pool)
+	ir, irHash, err := loadIRCheckpoint(pool)
 	if err != nil {
 		return fmt.Errorf("load IR checkpoint: %w", err)
+	}
+	if irHash != "" {
+		log.Info("loaded IR checkpoint", "hash", irHash[:min(12, len(irHash))], "entities", len(ir.Entities))
 	}
 
 	log.Debug("init: register entity services")
@@ -304,12 +307,30 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		return fmt.Errorf("register entity services: %w", err)
 	}
 
+	log.Debug("init: schema listener")
+	schemaListener := entity.NewSchemaListener(pool.Raw(), dynServer, func(ctx context.Context) (*dsl.IR, string, error) {
+		return loadIRCheckpoint(pool)
+	}, log.With("component", "schema-listener"))
+	workerWG.Add(1)
+	go func() {
+		defer workerWG.Done()
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("schema listener panic", "panic", rec)
+			}
+		}()
+		if err := schemaListener.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("schema listener exited", "err", err)
+		}
+	}()
+	log.Info("schema listener enabled")
+
 	log.Debug("init: net.Listen", "addr", cfg.GRPCAddr)
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
 		return err
 	}
-	defer lis.Close()
+	defer func() { _ = lis.Close() }()
 	log.Info("grtide listening", "addr", cfg.GRPCAddr)
 
 	// Serve until ctx is canceled; then GracefulStop.
@@ -387,16 +408,24 @@ func buildLogger(cfg config) *slog.Logger {
 	return log
 }
 
-// loadIRCheckpoint reads the current IR from atlantis.ir_checkpoint. If
-// no checkpoint exists yet (fresh database), an empty IR is returned so
-// the server can start without entity services and accept PlanSchema RPCs.
-func loadIRCheckpoint(pool *pg.Pool) (*dsl.IR, error) {
+// loadIRCheckpoint reads the current IR and content hash from
+// atlantis.ir_checkpoint. If no checkpoint exists yet (fresh database),
+// an empty IR is returned so the server can start and accept PlanSchema.
+func loadIRCheckpoint(pool *pg.Pool) (*dsl.IR, string, error) {
 	var raw []byte
-	err := pool.QueryRow(context.Background(), `SELECT ir FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&raw)
+	var contentHash *string
+	err := pool.QueryRow(context.Background(),
+		`SELECT ir, content_hash FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&raw, &contentHash)
 	if err != nil {
-		// No checkpoint yet — return an empty IR so the server boots and
-		// the admin service can accept the first PlanSchema call.
-		return &dsl.IR{Version: dsl.CurrentIRVersion}, nil
+		return &dsl.IR{Version: dsl.CurrentIRVersion}, "", nil
 	}
-	return dsl.DecodeJSONIR(raw)
+	ir, err := dsl.DecodeJSONIR(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	hash := ""
+	if contentHash != nil {
+		hash = *contentHash
+	}
+	return ir, hash, nil
 }

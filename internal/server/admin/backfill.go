@@ -211,13 +211,15 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 	}
 
 	backfillDiff := codegen.ComputeDiff(prior, newIR)
+	bfHash, _ := loadCheckpointHashTx(ctx, tx)
 	_, err = s.persistCheckpoint(ctx, tx, newIR, versionMeta{
-		Caller:    req.Caller,
-		PlanClass: backfillDiff.HighestClass().String(),
-		Diff:      backfillDiff,
-		UpSQL:     req.PreBackfillUpSQL,
-		PlanID:    req.PlanID,
-		EventType: "apply",
+		Caller:       req.Caller,
+		PlanClass:    backfillDiff.HighestClass().String(),
+		Diff:         backfillDiff,
+		UpSQL:        req.PreBackfillUpSQL,
+		PlanID:       req.PlanID,
+		EventType:    "apply",
+		ExpectedHash: bfHash,
 	})
 	if err != nil {
 		return nil, err
