@@ -48,6 +48,8 @@ func main() {
 		os.Exit(cmdPlan(os.Args[2:]))
 	case "pull":
 		os.Exit(cmdPull(os.Args[2:]))
+	case "generate":
+		os.Exit(cmdGenerate(os.Args[2:]))
 	case "list":
 		os.Exit(cmdList(os.Args[2:]))
 	case "show":
@@ -81,6 +83,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: tide apply    [--backfill] [--dry-run] [--no-pull]")
 	fmt.Fprintln(os.Stderr, "       tide plan     [--against URL] [--format table|json] [--no-pull]")
 	fmt.Fprintln(os.Stderr, "       tide pull     [--force]")
+	fmt.Fprintln(os.Stderr, "       tide generate")
 	fmt.Fprintln(os.Stderr, "       tide list")
 	fmt.Fprintln(os.Stderr, "       tide show     <path-substring>")
 	fmt.Fprintln(os.Stderr, "       tide backfill status [plan-hash]")

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,6 +34,9 @@ type tideConfig struct {
 		CA   string `yaml:"ca"`
 	} `yaml:"tls"`
 	OutputDir string `yaml:"output_dir"`
+	// Generate lists the namespaces `tide generate` emits a typed client
+	// for — the caller's own namespace plus any it consumes cross-namespace.
+	Generate []string `yaml:"generate"`
 }
 
 func loadPCConfig(path string) (*tideConfig, error) {
@@ -88,5 +92,13 @@ func applyEnvOverrides(c *tideConfig) {
 	}
 	if v := os.Getenv("TIDE_TLS_CA"); v != "" {
 		c.TLS.CA = v
+	}
+	if v := os.Getenv("ATL_GENERATE"); v != "" {
+		c.Generate = nil
+		for _, ns := range strings.Split(v, ",") {
+			if ns = strings.TrimSpace(ns); ns != "" {
+				c.Generate = append(c.Generate, ns)
+			}
+		}
 	}
 }

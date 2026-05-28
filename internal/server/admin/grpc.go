@@ -58,6 +58,7 @@ type AdminServer interface {
 	PlanSchema(context.Context, PlanRequest) (*PlanResponse, error)
 	ApplyMigration(context.Context, ApplyRequest) (*ApplyResponse, error)
 	GetMergedSchema(context.Context, GetMergedSchemaRequest) (*GetMergedSchemaResponse, error)
+	GetCanonicalIR(context.Context, GetCanonicalIRRequest) (*GetCanonicalIRResponse, error)
 	BeginBackfillPlan(context.Context, BeginBackfillPlanRequest) (*BeginBackfillPlanResponse, error)
 	GetBackfillStatus(context.Context, GetBackfillStatusRequest) (*GetBackfillStatusResponse, error)
 	AdoptBaseline(context.Context, AdoptBaselineRequest) (*AdoptBaselineResponse, error)
@@ -97,6 +98,7 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "PlanSchema", Handler: handlePlanSchema},
 		{MethodName: "ApplyMigration", Handler: handleApplyMigration},
 		{MethodName: "GetMergedSchema", Handler: handleGetMergedSchema},
+		{MethodName: "GetCanonicalIR", Handler: handleGetCanonicalIR},
 		{MethodName: "BeginBackfillPlan", Handler: handleBeginBackfillPlan},
 		{MethodName: "GetBackfillStatus", Handler: handleGetBackfillStatus},
 		{MethodName: "AdoptBaseline", Handler: handleAdoptBaseline},
@@ -215,6 +217,42 @@ func handleGetMergedSchema(srv any, ctx context.Context, dec func(any) error, in
 
 func invokeGetMergedSchema(svc *Service, ctx context.Context, req *GetMergedSchemaRequest) (any, error) {
 	resp, err := svc.GetMergedSchema(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+// handleGetCanonicalIR is the gRPC entry for the `tide generate` flow.
+// Returns the checkpoint IR with proto numbers intact for caller-local
+// SDK generation. Same JSON-envelope shape as the other admin RPCs.
+func handleGetCanonicalIR(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetCanonicalIRRequest
+	if len(in.Raw) > 0 {
+		if err := json.Unmarshal(in.Raw, &req); err != nil {
+			return nil, err
+		}
+	}
+	if interceptor == nil {
+		return invokeGetCanonicalIR(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetCanonicalIR"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetCanonicalIR(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetCanonicalIR(svc *Service, ctx context.Context, req *GetCanonicalIRRequest) (any, error) {
+	resp, err := svc.GetCanonicalIR(ctx, *req)
 	if err != nil {
 		return nil, err
 	}

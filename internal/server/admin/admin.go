@@ -164,6 +164,19 @@ type GetMergedSchemaResponse struct {
 	Files   []SubmittedFile
 }
 
+// GetCanonicalIRRequest is the input to GetCanonicalIR. No fields today;
+// the caller always wants the current checkpoint IR.
+type GetCanonicalIRRequest struct{}
+
+// GetCanonicalIRResponse carries the canonical IR exactly as stored in the
+// checkpoint — proto field numbers included — so a caller generating a
+// typed client produces wire-identical messages. ContentHash lets the
+// caller pin the schema version it generated against.
+type GetCanonicalIRResponse struct {
+	IR          json.RawMessage
+	ContentHash string
+}
+
 // PlanSchema is the workhorse. The flow:
 //
 //  1. Validate the caller's submitted files parse.
@@ -523,6 +536,25 @@ ORDER BY caller, file_path`)
 		})
 	}
 	return resp, nil
+}
+
+// GetCanonicalIR returns the checkpoint IR verbatim — the raw bytes stored
+// at apply time, with proto field numbers intact. Callers generate their
+// typed client from this so wire encoding matches the server exactly;
+// re-lowering the .atl files locally could assign different field numbers.
+// Read-only. Returns an empty IR on a fresh database.
+func (s *Service) GetCanonicalIR(ctx context.Context, _ GetCanonicalIRRequest) (*GetCanonicalIRResponse, error) {
+	var raw []byte
+	var contentHash string
+	err := s.pool.QueryRow(ctx,
+		`SELECT ir, content_hash FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&raw, &contentHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return &GetCanonicalIRResponse{IR: json.RawMessage("null")}, nil
+		}
+		return nil, fmt.Errorf("load canonical IR: %w", err)
+	}
+	return &GetCanonicalIRResponse{IR: raw, ContentHash: contentHash}, nil
 }
 
 // mergedEntry is the in-memory shape of one caller_registrations row used

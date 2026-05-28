@@ -21,14 +21,14 @@ import (
 //
 // There is no aggregate `Client` struct. With per-namespace packages,
 // callers reach for `consumer.NewAccountClient(conn)` directly.
-func EmitGoClient(newIR *dsl.IR) ([]GoFile, error) {
+func EmitGoClient(newIR *dsl.IR, cfg GenConfig) ([]GoFile, error) {
 	if newIR == nil {
 		return nil, fmt.Errorf("EmitGoClient: newIR is required")
 	}
 	var out []GoFile
 	for i := range newIR.Entities {
 		e := &newIR.Entities[i]
-		f, err := emitGoClientEntity(e)
+		f, err := emitGoClientEntity(e, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("entity %s: %w", e.ID(), err)
 		}
@@ -38,7 +38,7 @@ func EmitGoClient(newIR *dsl.IR) ([]GoFile, error) {
 	return out, nil
 }
 
-func emitGoClientEntity(e *dsl.Entity) (GoFile, error) {
+func emitGoClientEntity(e *dsl.Entity, cfg GenConfig) (GoFile, error) {
 	if _, err := buildPKSpec(e); err != nil {
 		return GoFile{}, err
 	}
@@ -50,7 +50,7 @@ func emitGoClientEntity(e *dsl.Entity) (GoFile, error) {
 	b.WriteString("import (\n")
 	b.WriteString("\t\"context\"\n\n")
 	b.WriteString("\t\"google.golang.org/grpc\"\n\n")
-	fmt.Fprintf(&b, "\tpb \"github.com/rachitkumar205/atlantis-go/pb/atlantis/%s/v1\"\n", goNamespace(e.Namespace))
+	fmt.Fprintf(&b, "\tpb \"%s/pb/atlantis/%s/v1\"\n", cfg.pbImportPrefix(), goNamespace(e.Namespace))
 	b.WriteString(")\n\n")
 
 	ifaceName := e.Name + "Client"
