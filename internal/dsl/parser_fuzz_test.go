@@ -56,9 +56,9 @@ func FuzzParseAndLower(f *testing.F) {
 		// Comment-only.
 		[]byte("// just a comment\n/* and another */"),
 		// Long identifier.
-		[]byte("entity " + repeatStr("x", 4096) + " in y { id bigint primary }"),
+		[]byte("entity "+repeatStr("x", 4096)+" in y { id bigint primary }"),
 		// Long namespace.
-		[]byte("entity A in " + repeatStr("x", 4096) + " { id bigint primary }"),
+		[]byte("entity A in "+repeatStr("x", 4096)+" { id bigint primary }"),
 		// Vector with unusual dimensions.
 		[]byte("entity A in x { id bigint primary v vector(0) }"),
 		[]byte("entity A in x { id bigint primary v vector(-1) }"),

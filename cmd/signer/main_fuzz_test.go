@@ -39,9 +39,9 @@ import (
 //     - have CA:FALSE (never sign a CA-capable leaf)
 //     - have BasicConstraintsValid=true
 //     - have ExtKeyUsage containing ClientAuth (the only EKU the
-//       handler ought to set)
+//     handler ought to set)
 //     - have a NotAfter within ~91 days of now (TTL is 90 days; tolerate
-//       a day of skew)
+//     a day of skew)
 //     - have a Subject CN exactly matching the request `caller`
 func FuzzHandleIssue(f *testing.F) {
 	setupTestCA(f)
