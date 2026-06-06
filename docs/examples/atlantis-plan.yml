@@ -1,0 +1,60 @@
+# atlantis schema plan — caller-side CI workflow.
+#
+# Drop this into your caller repo as `.github/workflows/atlantis-plan.yml`.
+# On every PR that touches a `.atl` file, it installs `tide`, runs
+# `tide plan` against your atlantis endpoint, and the exit code drives a
+# required status check. A breaking plan exits non-zero → branch
+# protection blocks merge.
+#
+# Required GitHub secrets (Settings → Secrets and variables → Actions):
+#   ATL_ENDPOINT       — host:port of your atlantis server (e.g. atlantis.yourco.com:443)
+#   TIDE_TLS_CERT_PEM  — the caller's signed leaf cert PEM (issued from the console)
+#   TIDE_TLS_KEY_PEM   — the caller's private key PEM
+#   TIDE_TLS_CA_PEM    — the atlantis CA cert PEM (same `ca.crt` the console ships)
+#
+# Required repository variable:
+#   TIDE_VERSION       — the tide release tag to install (e.g. v0.4.0).
+#                        Pin a version; don't track 'latest' — a future
+#                        breaking change in tide's wire format would
+#                        silently break every caller on the same day.
+
+name: atlantis schema plan
+
+on:
+  pull_request:
+    paths:
+      - "**/*.atl"
+      - "tide.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: tide plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tide
+        env:
+          # Defaults to v0.4.0 if the repo variable is unset, so the
+          # workflow keeps working out-of-the-box for first-time adopters.
+          TIDE_VERSION: ${{ vars.TIDE_VERSION || 'v0.4.0' }}
+        run: |
+          set -euo pipefail
+          ORG=rachitkumar205  # ← change to your fork / org
+          curl -sSLfo /tmp/tide.tar.gz \
+            "https://github.com/${ORG}/atlantis/releases/download/${TIDE_VERSION}/tide-${TIDE_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/tide.tar.gz -C /tmp
+          sudo mv /tmp/tide-${TIDE_VERSION}-linux-amd64/tide /usr/local/bin/tide
+          tide version
+
+      - name: Run tide plan
+        env:
+          ATL_ENDPOINT:      ${{ secrets.ATL_ENDPOINT }}
+          TIDE_TLS_CERT_PEM: ${{ secrets.TIDE_TLS_CERT_PEM }}
+          TIDE_TLS_KEY_PEM:  ${{ secrets.TIDE_TLS_KEY_PEM }}
+          TIDE_TLS_CA_PEM:   ${{ secrets.TIDE_TLS_CA_PEM }}
+        run: tide plan

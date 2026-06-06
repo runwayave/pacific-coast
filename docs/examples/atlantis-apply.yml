@@ -1,0 +1,69 @@
+# atlantis schema apply — caller-side CI workflow.
+#
+# Drop this into your caller repo as `.github/workflows/atlantis-apply.yml`.
+# On every push to main that touches a `.atl` file, it installs `tide` and
+# runs `tide apply` against your atlantis endpoint. This is the ONLY path
+# by which schema reaches production — humans never `tide apply` directly.
+#
+# Required GitHub secrets (Settings → Secrets and variables → Actions):
+#   ATL_ENDPOINT       — host:port of your atlantis server
+#   TIDE_TLS_CERT_PEM  — leaf cert PEM (issued from the console)
+#   TIDE_TLS_KEY_PEM   — private key PEM
+#   TIDE_TLS_CA_PEM    — atlantis CA cert PEM
+#
+# Required repository variable:
+#   TIDE_VERSION       — pin a release tag (e.g. v0.4.0)
+#
+# IMPORTANT: the cert configured here MUST be one whose CN is in
+# atlantis's ATL_MUTATION_ALLOWED_CALLERS env var OR has
+# caller_identities.can_mutate=true. The plan workflow can use a read-only
+# cert; this one needs the can-mutate bit. Issue a SEPARATE cert with
+# `can_mutate=true` from the console for this purpose and use it ONLY in
+# this workflow — never on engineers' laptops.
+
+name: atlantis schema apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.atl"
+      - "tide.yaml"
+
+permissions:
+  contents: read
+
+# Serialize applies for the same caller. atlantis itself takes an
+# advisory lock on apply, but serializing here surfaces "apply already in
+# flight" as a queued job rather than a noisy server-side conflict.
+concurrency:
+  group: atlantis-apply-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: tide apply
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tide
+        env:
+          TIDE_VERSION: ${{ vars.TIDE_VERSION || 'v0.4.0' }}
+        run: |
+          set -euo pipefail
+          ORG=rachitkumar205  # ← change to your fork / org
+          curl -sSLfo /tmp/tide.tar.gz \
+            "https://github.com/${ORG}/atlantis/releases/download/${TIDE_VERSION}/tide-${TIDE_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/tide.tar.gz -C /tmp
+          sudo mv /tmp/tide-${TIDE_VERSION}-linux-amd64/tide /usr/local/bin/tide
+          tide version
+
+      - name: Run tide apply
+        env:
+          ATL_ENDPOINT:      ${{ secrets.ATL_ENDPOINT }}
+          TIDE_TLS_CERT_PEM: ${{ secrets.TIDE_TLS_CERT_PEM }}
+          TIDE_TLS_KEY_PEM:  ${{ secrets.TIDE_TLS_KEY_PEM }}
+          TIDE_TLS_CA_PEM:   ${{ secrets.TIDE_TLS_CA_PEM }}
+        run: tide apply

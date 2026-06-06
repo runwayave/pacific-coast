@@ -9,6 +9,10 @@ Restart=on-failure
 RestartSec=5
 # Reap any container left behind by an unclean stop before starting.
 ExecStartPre=-/usr/bin/docker rm -f atlantis
+# Image tag hard-coded to atlantis:local. `make deploy` tags the build as
+# $(IMAGE) and restarts this unit; if you override IMAGE at build time,
+# edit this line and `systemctl daemon-reload` or the restart will pull
+# the old tag.
 ExecStart=/usr/bin/docker run --rm --name atlantis \
   --network host \
   --env-file /etc/atlantis/atlantis.env \
