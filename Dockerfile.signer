@@ -1,0 +1,36 @@
+# atlantis-signer — narrow cert-signing service.
+# Holds the intermediate CA key; accepts CSRs and issues caller leaf certs.
+# No CA key leaves this container.
+
+# ── build ──────────────────────────────────────────────────────────────────────
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+# clients/go is a replace-directive sub-module; copy it so go mod download works.
+COPY clients/ clients/
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/atlantis-signer ./cmd/signer
+
+# ── runtime ────────────────────────────────────────────────────────────────────
+FROM alpine:3.20
+
+RUN addgroup -S signer && adduser -S signer -G signer
+USER signer
+
+COPY --from=builder /out/atlantis-signer /usr/local/bin/atlantis-signer
+
+# Container-internal port. The compose bundle maps host
+# 127.0.0.1:${SIGNER_PORT:-7071} → 7070; the Makefile self-host-caller-cert
+# target talks to the host-side mapping.
+EXPOSE 7070
+
+ENV CA_DIR=/ca-private \
+    SIGNER_LISTEN=:7070
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
+  CMD wget -q -O - http://127.0.0.1:7070/healthz || exit 1
+
+ENTRYPOINT ["atlantis-signer"]
