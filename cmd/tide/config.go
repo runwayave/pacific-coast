@@ -29,9 +29,22 @@ type tideConfig struct {
 	Endpoint    string   `yaml:"endpoint"`
 	SchemaPaths []string `yaml:"schema_paths"`
 	TLS         struct {
+		// File-path variants. Used in dev (tide.yaml points at on-disk
+		// certs) and in production deployments where the runner has
+		// access to a secret-mounted volume.
 		Cert string `yaml:"cert"`
 		Key  string `yaml:"key"`
 		CA   string `yaml:"ca"`
+
+		// Inline PEM content variants. Populated only from the
+		// TIDE_TLS_*_PEM env vars; never from tide.yaml — the yaml:"-"
+		// tags prevent a misguided operator from pasting a private key
+		// into tide.yaml and committing it to git. When non-empty
+		// these take precedence over the file-path fields above and
+		// flow straight into tls.X509KeyPair without touching disk.
+		CertPEM string `yaml:"-"`
+		KeyPEM  string `yaml:"-"`
+		CAPEM   string `yaml:"-"`
 	} `yaml:"tls"`
 	OutputDir string `yaml:"output_dir"`
 	// Generate lists the namespaces `tide generate` emits a typed client
@@ -57,6 +70,22 @@ func loadPCConfig(path string) (*tideConfig, error) {
 		return nil, fmt.Errorf("%s: tls.{cert,key,ca} contain literal ${VAR} placeholders; "+
 			"YAML does not expand env vars — leave the field blank in the file and set the "+
 			"TIDE_TLS_CERT / TIDE_TLS_KEY / TIDE_TLS_CA env vars instead", path)
+	}
+	// Mixing a file-path source and an inline PEM source for the same
+	// material is always a config mistake — one of them is silently
+	// shadowed and the operator can't tell which. Fail loud rather than
+	// silently picking PEM (the current precedence) and confusing them.
+	for _, pair := range []struct {
+		name, pem, path string
+	}{
+		{"cert", c.TLS.CertPEM, c.TLS.Cert},
+		{"key", c.TLS.KeyPEM, c.TLS.Key},
+		{"ca", c.TLS.CAPEM, c.TLS.CA},
+	} {
+		if pair.pem != "" && pair.path != "" {
+			return nil, fmt.Errorf("%s: both TIDE_TLS_%s_PEM and tls.%s (or TIDE_TLS_%s) are set — pick one",
+				path, strings.ToUpper(pair.name), pair.name, strings.ToUpper(pair.name))
+		}
 	}
 	if c.Caller == "" {
 		return nil, fmt.Errorf("%s: `caller` is required", path)
@@ -92,6 +121,18 @@ func applyEnvOverrides(c *tideConfig) {
 	}
 	if v := os.Getenv("TIDE_TLS_CA"); v != "" {
 		c.TLS.CA = v
+	}
+	// Inline PEM env vars. dial() passes these directly to
+	// tls.X509KeyPair without ever touching disk — no /tmp leak, no
+	// temp-file cleanup, no race against a concurrent fs scan.
+	if v := os.Getenv("TIDE_TLS_CERT_PEM"); v != "" {
+		c.TLS.CertPEM = v
+	}
+	if v := os.Getenv("TIDE_TLS_KEY_PEM"); v != "" {
+		c.TLS.KeyPEM = v
+	}
+	if v := os.Getenv("TIDE_TLS_CA_PEM"); v != "" {
+		c.TLS.CAPEM = v
 	}
 	if v := os.Getenv("ATL_GENERATE"); v != "" {
 		c.Generate = nil

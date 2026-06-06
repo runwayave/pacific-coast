@@ -131,7 +131,7 @@ func TestLex_Durations(t *testing.T) {
 		{"10m", "10m"},
 		{"1h", "1h"},
 		{"7d", "7d"},
-		{"500ms", "500"}, // we do NOT support ms in v0.1; "500" lexes as int, "ms" as ident
+		{"500ms", "500"}, // we do NOT lex `ms` as a duration suffix; "500" lexes as int, "ms" as ident
 	}
 	for _, c := range cases {
 		toks := lexAll(t, c.src)

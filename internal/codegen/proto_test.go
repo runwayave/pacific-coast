@@ -300,7 +300,7 @@ func TestProto_HeaderComment(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Phase E — QueryX surface emission
+// QueryX surface emission
 
 func TestProto_EmitQueryRPC(t *testing.T) {
 	ir := lower(t, `

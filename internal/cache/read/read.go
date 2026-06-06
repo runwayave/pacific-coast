@@ -37,6 +37,10 @@ type Loader func(ctx context.Context) ([]byte, error)
 // Config tunes the reader.
 type Config struct {
 	// LRUSize is the tier-0 in-process cache capacity. 0 disables tier-0.
+	// Scope is PROCESS-WIDE: one LRU shared across every entity in this
+	// process, keyed by `entity/id`. A hot entity can evict cold-but-
+	// cached entries from any other entity. Per-entity caps require a
+	// multi-LRU rewrite.
 	LRUSize int
 
 	// MaxValueBytes is the largest individual body that may live in tier-0.
@@ -68,9 +72,8 @@ func DefaultConfig() Config {
 	}
 }
 
-// Reader is the read-path façade. Construct one per process; share liberally.
-//
-// Reader is safe for concurrent use.
+// Reader is the read-path façade. One instance per process; safe for
+// concurrent use.
 type Reader struct {
 	cache PointerCache
 	cfg   Config

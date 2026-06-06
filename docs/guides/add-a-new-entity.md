@@ -36,6 +36,8 @@ tide apply
 
 `tide plan` reports what would change without mutating. `tide apply` runs the migration and updates the merged schema.
 
+To preview behaviour before applying — seed rows, run queries, capture and diff state — boot a copy of the schema in the [sandbox](use-the-sandbox.md).
+
 Common errors:
 
 - `references unknown entity shop.Customer`: the referenced entity hasn't been registered yet. Run `tide apply` from the repo that declares `shop.Customer` first.

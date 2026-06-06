@@ -239,7 +239,7 @@ func (e *WorkflowEngine) loadWorkflowIR(ctx context.Context, name string) (*dsl.
 }
 
 // buildStepArgs resolves step arg expressions against the workflow
-// state. For v1 only $name (state field) and string literals are
+// state. For now only $name (state field) and string literals are
 // supported; the resolver pulls $name from the state JSON.
 func (e *WorkflowEngine) buildStepArgs(args []dsl.EnqueueAssignmentIR, stateJSON string) ([]byte, error) {
 	var state map[string]any

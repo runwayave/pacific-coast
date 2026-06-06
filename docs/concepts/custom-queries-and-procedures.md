@@ -50,8 +50,13 @@ Atlantis validates parameter references and `touches(...)` targets at apply time
 - Reads that need aggregations, window functions, `DISTINCT ON`, conditional aggregates, or any shape the typed predicate language doesn't cover: `query`.
 - Writes that touch more than one entity atomically, or upserts beyond `ON CONFLICT DO NOTHING` and a single-column `DO UPDATE SET`: `procedure`.
 
+## Testing custom SQL before `tide apply`
+
+Paste a `query` or `procedure` body into the SQL tab of the [sandbox](sandbox.md) to verify it against seed data before applying. The sandbox's in-memory backend runs the same SQL surface the in-memory executor models; for shapes outside that surface, switch the sandbox to the Postgres backend at boot time.
+
 ## Related
 
 - [The typed query surface](the-typed-query-surface.md) — the generated `Query`/`Create`/`Update`/`Delete` methods.
 - [Caching and invalidation](caching-and-invalidation.md) — how `touches(...)` keeps the cache consistent.
+- [The sandbox](sandbox.md) — preview custom SQL against synthetic rows before applying.
 - [The DSL grammar](../reference/dsl-grammar.md) — the full `query` and `procedure` syntax.

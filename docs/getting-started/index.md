@@ -76,8 +76,9 @@ The migration has run against the local Postgres. Verify with `psql`; there is n
 - `tide list` — print every entity currently in the merged schema.
 - `tide show Note` — print the canonical `.atl` text for the `Note` entity.
 - [Your first custom query](your-first-custom-query.md) — declare a read that doesn't fit primary-key lookup.
+- [Use the sandbox](../guides/use-the-sandbox.md) — boot a disposable copy of the schema with seed data; preview queries before they hit production.
 - [Concepts](../concepts/) — the model behind `.atl`, the cache, the CLI split.
 
-Generating the typed Go client is a manual `buf generate` step in v0.1; v0.2 wires this into `tide apply`.
+Regenerate the typed Go client after a schema change with `tide generate` — it fetches the canonical IR from the server, scopes it to the namespaces declared in `tide.yaml`'s `generate:` field, and writes proto + typed wrappers into your caller module.
 
 Stop the stack with `Ctrl-C` in the server terminal (the volume is discarded).

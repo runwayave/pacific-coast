@@ -63,7 +63,7 @@ A single goroutine in the server polls the `outbox` table at `OUTBOX_DRAIN_INTER
 SELECT id, kind, payload FROM outbox WHERE done_at IS NULL ORDER BY id LIMIT $batch
 ```
 
-For each row, it applies the invalidation to memcached and marks the row done. Single-instance is enforced at the deployment level in v0.1 — running multiple server replicas with `OUTBOX_BATCH_SIZE > 0` would have them compete on the same rows. A future version may add `FOR UPDATE SKIP LOCKED` and shard work by entity.
+For each row, it applies the invalidation to memcached and marks the row done. Single-instance is currently enforced at the deployment level — running multiple server replicas with `OUTBOX_BATCH_SIZE > 0` would have them compete on the same rows. A future version may add `FOR UPDATE SKIP LOCKED` and shard work by entity.
 
 ## Filter hashing
 

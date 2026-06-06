@@ -17,7 +17,7 @@ import (
 
 // ----------------------------------------------------------------------------
 // Test fixture: a hand-built TestFilter message that mirrors what codegen
-// will emit in Phase E Step 3. Built via descriptorpb + protodesc so we
+// the translator emits. Built via descriptorpb + protodesc so we
 // don't need a buf-generated test proto cluttering the repo.
 
 func testFilterDescriptor(t *testing.T) protoreflect.MessageDescriptor {

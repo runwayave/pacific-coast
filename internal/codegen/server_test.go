@@ -62,8 +62,8 @@ entity Account in consumer {
 
 func TestEmitGoServer_PathFormat(t *testing.T) {
 	// Per-namespace package layout: gen/go/server/<ns>/<entity>_server.go.
-	// Mirrors the proto layout and fixes the historical Cart/CartItem-style
-	// collision (PHASE_D.md decision #9).
+	// Mirrors the proto layout so consumer.CartItem and vendorpkg.CartItem land in
+	// different Go packages instead of colliding on the same flat name.
 	ir := lower(t, `entity SavedOutfit in consumer { id bigint primary }`)
 	files, _ := EmitGoServer(ir)
 	if files[0].Path != "gen/go/server/consumer/saved_outfit_server.go" {
@@ -100,7 +100,7 @@ func TestEmitGoServer_EmitsAllSixCoreMethods(t *testing.T) {
 
 func TestEmitGoServer_NativeProtoSignatures(t *testing.T) {
 	// Every method takes a proto request and returns a proto response.
-	// This is the load-bearing assertion of Phase D: the handler IS the
+	// This is the load-bearing assertion: the handler IS the
 	// buf-generated service interface; no adapter shim.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
 	files, _ := EmitGoServer(ir)
@@ -120,7 +120,7 @@ func TestEmitGoServer_NativeProtoSignatures(t *testing.T) {
 func TestEmitGoServer_InterfaceSatisfactionAssertion(t *testing.T) {
 	// The trailing `var _ pb.<Entity>ServiceServer = (*<Entity>Server)(nil)`
 	// line is what catches a handler-signature drift at `go build` time
-	// — way before a real RPC is ever issued. PHASE_D decision #4.
+	// — way before a real RPC is ever issued. The assert is the cheapest place to catch a generator/proto drift.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
 	files, _ := EmitGoServer(ir)
 	assertContains(t, entityServerFile(t, files), "var _ pb.AccountServiceServer = (*AccountServer)(nil)")
@@ -136,7 +136,7 @@ func TestEmitGoServer_EmbedsUnimplementedServer(t *testing.T) {
 }
 
 func TestEmitGoServer_NoLegacyRowStruct(t *testing.T) {
-	// Phase D drops the `<Entity>Row` struct — the proto message IS the
+	// The <Entity>Row struct is no longer emitted — the proto message IS the
 	// canonical row type. A stray `type AccountRow struct` would signal
 	// a partial revert.
 	ir := lower(t, `entity Account in consumer { id bigint primary }`)
@@ -148,8 +148,8 @@ func TestEmitGoServer_BakedSQLStatements(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
 	files, _ := EmitGoServer(ir)
 	c := entityServerFile(t, files)
-	// SQL constants are unchanged from pre-Phase-D — Phase D only retargets
-	// the I/O at the proto types, the SQL stays the same. Identifiers are
+	// SQL constants are baked into the emitter and don't depend on the proto-typed I/O layer.
+	// Identifiers are
 	// double-quoted (defense-in-depth against PG reserved words).
 	assertContains(t, c, `SELECT "id", "email" FROM "atlantis"."consumer_account" WHERE "id" = $1`)
 	assertContains(t, c, `SELECT "id", "email", COUNT(*) OVER () AS total FROM "atlantis"."consumer_account"`)
@@ -163,7 +163,7 @@ func TestEmitGoServer_InsertWrapsDefaultableColumnsInCOALESCE(t *testing.T) {
 	// Columns with declared SQL DEFAULT round-trip through COALESCE so an
 	// unset proto field (binding NULL) resolves to the column default
 	// instead of writing literal NULL. This is the durable fix for the
-	// caller-side `nowIfZero` shims — see plans/codegen-insert-default-and-autoid.md.
+	// caller-side `nowIfZero` shims.
 	ir := lower(t, `
 entity Thing in consumer {
   id            bigint primary
@@ -566,16 +566,9 @@ hypertable Purchase in vendor on purchased_at {
 	parseAsGo(t, entityServerFile(t, files))
 }
 
-// Composite-PK service interface is deferred to v0.2 (PHASE_D out-of-scope).
-// The emitter writes a header-only stub so the per-namespace Go package
-// keeps compiling and the path reserves itself for the day composite-PK
-// services land.
-
-// TestEmitGoServer_CompositePK_EmitsRealHandlers replaces the earlier
-// stub assertion (composite-PK entities previously emitted a header-only
-// file). The lift in Step 7 routes composite-PK entities through the
-// same emitter as single-PK ones; this test pins the resulting shape so
-// any future regression that re-introduces a stub is caught at compile
+// TestEmitGoServer_CompositePK_EmitsRealHandlers pins that composite-PK
+// entities flow through the same emitter as single-PK ones — any future
+// regression that re-introduces a header-only stub is caught at compile
 // time.
 func TestEmitGoServer_CompositePK_EmitsRealHandlers(t *testing.T) {
 	ir := lower(t, `
@@ -601,7 +594,7 @@ entity CartItem in consumer {
 	parseAsGo(t, c)
 
 	// Real handler: package header, struct, constructor, all seven RPC
-	// methods. The earlier "deferred to v0.2" stub is no longer emitted.
+	// methods. The earlier header-only stub must not regress.
 	assertContains(t, c, "package consumer")
 	assertNotContains(t, c, "deferred to v0.2")
 	assertContains(t, c, "type CartItemServer struct")
@@ -763,7 +756,7 @@ func TestGoFieldType_ScalarTypes(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Phase E — Go server emission for QueryX
+// Go server emission for QueryX
 
 func TestEmitGoServer_QueryHandlerEmitted(t *testing.T) {
 	ir := lower(t, `

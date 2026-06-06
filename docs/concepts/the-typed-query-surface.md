@@ -31,10 +31,11 @@ Three properties follow from typed predicates:
 
 ## When `Query` isn't enough
 
-`Query` is a typed predicate over one entity. Reads that need `GROUP BY`, `DISTINCT ON`, multi-entity joins, sampling, or window functions don't fit; declare a `query` or `procedure` block instead. The server validates the SQL when you run `tide apply` and the codegen emits a typed RPC.
+`Query` is a typed predicate over one entity. Reads that need `GROUP BY`, `DISTINCT ON`, multi-entity joins, sampling, or window functions don't fit; declare a `query` or `procedure` block instead. The server validates the SQL when you run `tide apply` and the codegen emits a typed RPC. Preview the custom SQL in the [sandbox](sandbox.md) before applying.
 
 ## Related
 
 - [Custom queries and procedures](custom-queries-and-procedures.md)
 - [Caching and invalidation](caching-and-invalidation.md) — how `Query` results are cached.
 - [The DSL grammar](../reference/dsl-grammar.md) — predicate types and operators.
+- [The sandbox](sandbox.md) — disposable copies of the schema for testing predicates and custom SQL.

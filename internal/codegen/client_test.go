@@ -77,7 +77,7 @@ entity CartItem in consumer {
 }
 
 func TestEmitGoClient_NoValueStructEmission(t *testing.T) {
-	// Phase D drops the hand-rolled `<Entity>` value struct. The proto
+	// The hand-rolled <Entity> value struct was removed; the proto
 	// message is the canonical value type. A stray `type Account struct`
 	// in the emitted client file means a partial revert.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
@@ -123,7 +123,7 @@ func TestEmitGoClient_ConcreteDialsBufStub(t *testing.T) {
 }
 
 func TestEmitGoClient_NoErrNotWiredSentinel(t *testing.T) {
-	// Pre-Phase-D client emitted `errNotWired` placeholders. Phase D
+	// The earlier `errNotWired` placeholders were replaced when the typed
 	// dials the real buf stub; the sentinel is dead code.
 	ir := lower(t, `entity A in x { id bigint primary }`)
 	files, _ := EmitGoClient(ir, GenConfig{})
@@ -236,7 +236,7 @@ func paths(files []GoFile) []string {
 }
 
 // ----------------------------------------------------------------------------
-// Phase E — Go client emission for QueryX
+// Go client emission for QueryX
 
 func TestEmitGoClient_QueryMethodEmitted(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id bigint primary email text not null }`)

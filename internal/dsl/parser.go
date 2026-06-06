@@ -172,13 +172,25 @@ func (p *Parser) parseEntity() *EntityDecl {
 	ns := p.expect(TokIdent)
 	p.expect(TokLBrace)
 	members := p.parseEntityMembers()
-	p.expect(TokRBrace)
+	rb := p.expect(TokRBrace)
 	return &EntityDecl{
 		Pos:       kw.Pos,
 		Name:      name.Value,
 		Namespace: ns.Value,
 		Members:   members,
+		EndByte:   braceEnd(rb),
 	}
+}
+
+// braceEnd returns the exclusive byte offset just past a closing-brace
+// token. The brace is a single ASCII byte, so this is exact. Returns 0
+// for a synthetic error token (no reliable position), matching the
+// "zero for synthesized parses" contract on the *Decl EndByte fields.
+func braceEnd(rb Token) int {
+	if rb.Kind != TokRBrace {
+		return 0
+	}
+	return rb.Pos.Byte + 1
 }
 
 func (p *Parser) parseHypertable() *HypertableDecl {
@@ -368,6 +380,10 @@ func (p *Parser) parseField() *FieldDecl {
 		Name:      name.Value,
 		Type:      typ,
 		Modifiers: mods,
+		// The cursor now sits on the next token (the following member or
+		// the entity's closing `}`); its start byte bounds this field's
+		// source span. atlprint trims the trailing whitespace/comments.
+		EndByte: p.peek().Pos.Byte,
 	}
 }
 

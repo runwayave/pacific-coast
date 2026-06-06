@@ -31,7 +31,7 @@ func emitProtoQuerySurface(b *strings.Builder, e *dsl.Entity, inbound []inboundR
 		if !ok {
 			// Unsupported types (vector, interval, arrays) silently skip.
 			// Callers can't filter on them via QueryX; vector search has
-			// its own RPC, interval/array are Phase F.
+			// its own RPC, interval and array filters aren't supported through the typed predicate surface yet.
 			continue
 		}
 		fmt.Fprintf(b, "  optional atlantis.common.v1.%s %s = %d;\n", pred, f.Name, f.ProtoNumber)

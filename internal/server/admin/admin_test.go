@@ -1,12 +1,136 @@
 package admin
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
+
+// fakeService builds a Service with just the mutation-gate fields wired —
+// enough to exercise authorizeSelfApply without touching pgx.
+func fakeService(allowAll bool, allowed []string, cn string) *Service {
+	set := map[string]bool{}
+	for _, c := range allowed {
+		set[c] = true
+	}
+	return &Service{
+		allowApplyMutation: allowAll,
+		mutationAllowed:    set,
+		callerFromContext:  func(context.Context) string { return cn },
+	}
+}
+
+func TestAuthorizeSelfApply_AllowWildcardGrantsAll(t *testing.T) {
+	s := fakeService(true, nil, "backend")
+	if err := s.authorizeSelfApply(context.Background(), "backend"); err != nil {
+		t.Fatalf("wildcard should permit own caller: %v", err)
+	}
+}
+
+func TestAuthorizeSelfApply_RejectsCrossCallerEvenWithWildcard(t *testing.T) {
+	// Wildcard allows mutation, but req.Caller must still match the CN.
+	// A leaked backend cert can't push to "vendor" even when the global
+	// wildcard is on.
+	s := fakeService(true, nil, "backend")
+	err := s.authorizeSelfApply(context.Background(), "vendor")
+	if err == nil {
+		t.Fatal("expected error when req.Caller does not match CN")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Errorf("expected same-CN mismatch error, got %v", err)
+	}
+}
+
+func TestAuthorizeSelfApply_PerCNAllowlist(t *testing.T) {
+	s := fakeService(false, []string{"ci-backend", "ci-vendor"}, "ci-backend")
+	if err := s.authorizeSelfApply(context.Background(), "ci-backend"); err != nil {
+		t.Fatalf("ci-backend should be allowed: %v", err)
+	}
+}
+
+func TestAuthorizeSelfApply_RejectsCNNotOnAllowlist(t *testing.T) {
+	s := fakeService(false, []string{"ci-backend"}, "backend")
+	err := s.authorizeSelfApply(context.Background(), "backend")
+	if err == nil {
+		t.Fatal("expected error: backend not on allowlist")
+	}
+	if !strings.Contains(err.Error(), "not permitted to mutate") {
+		t.Errorf("expected not-permitted error, got %v", err)
+	}
+}
+
+func TestAuthorizeSelfApply_InsecureDevModeWildcardPermits(t *testing.T) {
+	// No CN identity (insecure dev) + wildcard on → permit.
+	s := &Service{
+		allowApplyMutation: true,
+		mutationAllowed:    map[string]bool{},
+		callerFromContext:  func(context.Context) string { return "" },
+	}
+	if err := s.authorizeSelfApply(context.Background(), "anything"); err != nil {
+		t.Fatalf("dev mode + wildcard should permit: %v", err)
+	}
+}
+
+func TestAuthorizeOperator_AllowlistPermitsConsole(t *testing.T) {
+	s := &Service{
+		operatorAllowed:   map[string]bool{"atlantis-console": true},
+		callerFromContext: func(context.Context) string { return "atlantis-console" },
+	}
+	if err := s.authorizeOperator(context.Background()); err != nil {
+		t.Fatalf("console should be permitted: %v", err)
+	}
+}
+
+func TestAuthorizeOperator_AllowlistRejectsOtherCN(t *testing.T) {
+	// Even a caller on the apply allowlist isn't an operator unless
+	// they're separately on the operator list.
+	s := &Service{
+		mutationAllowed:   map[string]bool{"ci-backend": true},
+		operatorAllowed:   map[string]bool{"atlantis-console": true},
+		callerFromContext: func(context.Context) string { return "ci-backend" },
+	}
+	err := s.authorizeOperator(context.Background())
+	if err == nil {
+		t.Fatal("apply-allowed CN should not be an operator")
+	}
+}
+
+func TestAuthorizeOperator_EmptyAllowlistFallsBackToWildcard(t *testing.T) {
+	// Backward compat: empty operatorAllowed + wildcard on → permit.
+	s := &Service{
+		allowApplyMutation: true,
+		callerFromContext:  func(context.Context) string { return "anything" },
+	}
+	if err := s.authorizeOperator(context.Background()); err != nil {
+		t.Fatalf("legacy wildcard should still permit: %v", err)
+	}
+}
+
+func TestAuthorizeOperator_EmptyAllowlistAndNoWildcardRejects(t *testing.T) {
+	s := &Service{
+		callerFromContext: func(context.Context) string { return "anything" },
+	}
+	err := s.authorizeOperator(context.Background())
+	if err == nil {
+		t.Fatal("expected reject: nothing grants operator permission")
+	}
+}
+
+func TestAuthorizeSelfApply_InsecureDevModeWithoutWildcardRejects(t *testing.T) {
+	// No CN identity + no wildcard + empty allowlist → reject.
+	s := &Service{
+		allowApplyMutation: false,
+		mutationAllowed:    map[string]bool{},
+		callerFromContext:  func(context.Context) string { return "" },
+	}
+	err := s.authorizeSelfApply(context.Background(), "anything")
+	if err == nil {
+		t.Fatal("expected reject when nothing grants mutation permission")
+	}
+}
 
 func TestParseSubmitted_ProducesFiles(t *testing.T) {
 	files := []SubmittedFile{

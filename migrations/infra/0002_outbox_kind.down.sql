@@ -1,5 +1,8 @@
--- Drop kind discriminator. Queued generation_bump rows are lost on rollback
--- (worst case: stale tier-2 entries until TTL).
+-- Drop kind discriminator. Queued rows are NOT dropped — only the column.
+-- Any pending generation_bump rows will be reinterpreted by the worker as
+-- 'invalidation'-shaped, causing a malformed per-row invalidation
+-- (row_id was a placeholder for bumps). Drain the outbox to empty before
+-- rolling back.
 
 ALTER TABLE atlantis.cache_invalidations
     DROP CONSTRAINT IF EXISTS cache_invalidations_kind_check;

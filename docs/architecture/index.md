@@ -48,6 +48,8 @@ See: [cache architecture](cache-architecture.md), [migration ownership](migratio
 | Postgres connection, transactions, outbox writer | `internal/storage/pg/` |
 | Cache client and outbox drainer | `internal/cache/` |
 | Runtime helpers linked into generated code | `internal/runtime/` |
+| In-process sandbox runtime (sim + embedded backends) | `internal/runtime/sandbox/` |
+| Console BFF (incl. `/api/sandbox/*` layer) | `internal/console/` |
 | Admin service handlers | `internal/server/admin/` |
 | Generated SDK module | `clients/go/` |
 | Hand-written infra migrations | `migrations/infra/` |
@@ -59,3 +61,4 @@ See: [cache architecture](cache-architecture.md), [migration ownership](migratio
 - [Cache architecture](cache-architecture.md) — body cache, query-result cache, outbox worker, version pointers.
 - [Schema flow](schema-flow.md) — dev (`tide apply` mirror) vs prod (workspace manifest).
 - [Migration ownership](migration-ownership.md) — `infra/` vs `tidectl/` split.
+- [The sandbox](../concepts/sandbox.md) — in-process disposable runtime hosted by the console BFF.

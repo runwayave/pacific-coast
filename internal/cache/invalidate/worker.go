@@ -282,18 +282,20 @@ func (w *Worker) runListenSession(ctx context.Context, notifyCh chan struct{}) e
 // the same row and produce a stale pointer overwrite. With the tx, only
 // one worker can hold a given outbox row at a time across the full cycle.
 //
-// We do memcached SET *inside* the tx (which means an open Postgres tx
-// while making a network call to memcached). That's normally an anti-
-// pattern (transactions should not wrap external IO) but here:
+// We do memcached SET *inside* the tx (an open Postgres tx wrapping a
+// network call to memcached). Normally an anti-pattern, but here:
 //
-//   - the tx is the worker's tx, not a data-write tx — its only purpose
-//     is to serialize outbox processing
+//   - the tx exists only to keep the row lock from claimInTx held until
+//     DELETE — two workers may run their own txs in parallel against
+//     different batches (SKIP LOCKED makes them disjoint), so there is
+//     no global serialization being held open
 //   - the memcached call has a short hard timeout (100ms by default)
-//   - the tx holds a row lock on a small bounded set of cache_invalidations
-//     rows; it does not block any data path
+//   - the tx only holds row locks on the small bounded batch we just
+//     claimed; it does not block any data path
 //
-// So the cost is bounded and the alternative (releasing the lock then
-// racing the DELETE) is worse.
+// Releasing the lock the moment the SELECT returns and then racing the
+// DELETE is the alternative, and it lets two workers double-process the
+// same row and produce a stale pointer overwrite.
 func (w *Worker) drainOnce(ctx context.Context) int {
 	tx, err := w.pool.Begin(ctx)
 	if err != nil {
@@ -633,5 +635,3 @@ WHERE enqueued_at < now() - $1::interval`, w.cfg.Schema)
 	}
 	return tag.RowsAffected(), nil
 }
-
-var _ pgx.Conn // anchor for the pgx import; CI vet would flag unused otherwise

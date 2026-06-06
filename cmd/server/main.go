@@ -51,24 +51,24 @@ func main() {
 		os.Exit(2)
 	}
 
-	log := buildLogger(cfg)
+	log, logRing := buildLogger(cfg)
 	log.Info("atlantis starting", "version", version)
 
 	// Top-level context cancels on SIGINT / SIGTERM.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cfg, log); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(ctx, cfg, log, logRing); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("server exited with error", "err", err)
 		os.Exit(1)
 	}
 }
 
-// run does the actual work; separate from main so tests can drive it. Each
-// resource is created and Close-deferred in order — pool first so the
-// invalidation worker (which acquires a connection) can register cleanup
-// before its Run starts.
-func run(ctx context.Context, cfg config, log *slog.Logger) error {
+// run is the top-level orchestrator. Resources are constructed in
+// dependency order so each Close-defer runs LIFO at the end: pool is
+// created first so the invalidation worker (which acquires a connection)
+// can register cleanup before its Run starts.
+func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing) error {
 	if cfg.AutoMigrate {
 		if err := runAutoMigrate(cfg.PGURL, cfg.MigrationsDir, log); err != nil {
 			return err
@@ -168,6 +168,8 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		Worker:             worker,
 		WorkerMaxStaleness: 3 * cfg.OutboxDrainInterval,
 		ProbeTimeout:       cfg.HealthProbeTimeout,
+		StartedAt:          time.Now(),
+		Version:            version,
 	}, ctx)
 	go func() {
 		log.Info("health http listening", "addr", cfg.HealthAddr)
@@ -227,10 +229,18 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 
 	log.Debug("init: register admin service")
 	admin.Register(srv, admin.New(pool.Raw(), admin.Config{
-		MirrorDir:          cfg.AdminMirrorDir,
-		MirrorEnabled:      cfg.AdminMirrorSchema,
-		AllowApplyMutation: cfg.AdminAllowApplyMutation,
-		BackfillEnabled:    cfg.BackfillWorkerEnabled,
+		MirrorDir:              cfg.AdminMirrorDir,
+		MirrorEnabled:          cfg.AdminMirrorSchema,
+		AllowApplyMutation:     cfg.AdminAllowApplyMutation,
+		MutationAllowedCallers: cfg.AdminMutationAllowedCallers,
+		OperatorAllowedCallers: cfg.AdminOperatorAllowedCallers,
+		// Share the cert-CN extractor with the auth + rate-limit
+		// interceptors so every layer agrees on caller identity for the
+		// same request — a divergence here would let a CN authorized
+		// by one layer be evaluated as a different identity by another.
+		CallerFromContext: callerFromContext,
+		BackfillEnabled:   cfg.BackfillWorkerEnabled,
+		LogRing:           logRing,
 	}))
 
 	// Backfill worker — gated by ATL_BACKFILL_WORKER_ENABLED. Shares
@@ -295,7 +305,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 			log.Info("jobs worker enabled", "queue", queue)
 		}
 	}
-	_ = jobsRegistry // exported via Server.JobsRegistry once PR-C wires the public surface
+	_ = jobsRegistry // stashed for future public access; today only the in-process worker goroutines need it.
 
 	log.Debug("init: load IR checkpoint")
 	ir, irHash, err := loadIRCheckpoint(pool)
@@ -336,7 +346,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		return err
 	}
 	defer func() { _ = lis.Close() }()
-	log.Info("grtide listening", "addr", cfg.GRPCAddr)
+	log.Info("grpc listening", "addr", cfg.GRPCAddr)
 
 	// Serve until ctx is canceled; then GracefulStop.
 	errCh := make(chan error, 1)
@@ -392,7 +402,12 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 
 // buildLogger wires slog from the LOG_LEVEL env var. JSON in non-dev, text
 // when LOG_LEVEL is "debug" so local runs are readable.
-func buildLogger(cfg config) *slog.Logger {
+//
+// The returned LogRing is teed off the same handler — every slog call
+// also publishes into it for the console's Health page tail. The ring
+// is lock-free (see internal/obs/logring.go) so the tee adds ~50-100 ns
+// per emit, invisible at millisecond-scale RPC latencies.
+func buildLogger(cfg config) (*slog.Logger, *obs.LogRing) {
 	lvl := slog.LevelInfo
 	switch cfg.LogLevel {
 	case "debug":
@@ -402,15 +417,17 @@ func buildLogger(cfg config) *slog.Logger {
 	case "error":
 		lvl = slog.LevelError
 	}
-	var h slog.Handler
+	var base slog.Handler
 	if cfg.LogLevel == "debug" {
-		h = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+		base = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
 	} else {
-		h = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+		base = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
 	}
+	ring := obs.NewLogRing(cfg.LogRingSize)
+	h := obs.NewRingHandler(base, ring)
 	log := slog.New(h)
 	slog.SetDefault(log)
-	return log
+	return log, ring
 }
 
 // loadIRCheckpoint reads the current IR and content hash from

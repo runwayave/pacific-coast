@@ -26,7 +26,7 @@ const (
 )
 
 // payload is the in-memory shape of a decoded cache entry. NextPageToken
-// is the empty string for v1 entries (which predate keyset pagination)
+// is the empty string for entries that predate keyset pagination
 // and for v2 entries that ended on the last page.
 type payload struct {
 	NextPageToken string

@@ -24,6 +24,12 @@ type EntityDecl struct {
 	Name      string
 	Namespace string
 	Members   []EntityMember
+
+	// EndByte is the exclusive byte offset just past the entity's closing
+	// `}` (the brace is a single ASCII byte, so this is exact). Used by
+	// internal/dsl/atlprint to slice the entity's source span for surgical
+	// editing; zero for synthesized parses.
+	EndByte int
 }
 
 func (*EntityDecl) isDecl()              {}
@@ -55,6 +61,14 @@ type FieldDecl struct {
 	Name      string
 	Type      TypeRef
 	Modifiers []FieldModifier
+
+	// EndByte is the byte offset of the next token after this field — its
+	// following sibling member, or the entity's closing `}`. Only
+	// whitespace and comments sit between the field's last token and
+	// EndByte (the lexer discards both), so the field's own text ends at
+	// the last non-whitespace byte before EndByte. Used by
+	// internal/dsl/atlprint; zero for synthesized parses.
+	EndByte int
 }
 
 func (*FieldDecl) isEntityMember()      {}

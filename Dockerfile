@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
 # ---------- build ----------
-# Pin to linux/amd64: the prod target is x86-64, and pinning here keeps the
-# image amd64 even when built on an arm64 host (Apple Silicon). The build then
-# runs under emulation but with a real amd64 cgo toolchain — which a
-# cross-compile of pg_query_go's vendored C parser would otherwise require.
-FROM --platform=linux/amd64 golang:1.25.0-alpine3.21 AS build
+# Use BUILDPLATFORM so the compiler runs natively on the host (ARM64 on Apple
+# Silicon, amd64 on CI). pg_query_go's vendored C parser compiles fine on both
+# architectures with musl + build-base. For a forced amd64 production image,
+# pass --platform linux/amd64 to docker build or use a CI runner.
+FROM --platform=$BUILDPLATFORM golang:1.25.0-alpine3.21 AS build
 
 # CGO toolchain for pg_query_go (vendored C parser, statically linked).
 RUN apk add --no-cache build-base
@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     -o /out/atlantis ./cmd/server
 
 # ---------- runtime ----------
-FROM --platform=linux/amd64 alpine:3.21
+FROM alpine:3.21
 
 RUN adduser -D -u 10001 atlantis && \
     apk --no-cache add ca-certificates tzdata
@@ -39,7 +39,9 @@ WORKDIR /app
 COPY --from=build /out/atlantis /app/atlantis
 COPY migrations /app/migrations
 
-# Runtime user needs write access to /app for tide apply's mirror step.
+# /app/schema is writable so `tide apply` can mirror submitted .atl files
+# when ATL_MIRROR_SCHEMA=true (dev-only — see deploy/.env.example). Owned
+# by the non-root atlantis user so the server never runs as root.
 RUN mkdir -p /app/schema && chown -R atlantis:atlantis /app
 
 USER atlantis

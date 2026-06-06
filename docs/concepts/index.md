@@ -7,6 +7,7 @@ Core concepts before writing `.atl` files. Start with [Schema as code](schema-as
 - [Schema versioning](schema-versioning.md). Append-only version registry, structural diffs, per-field blame.
 - [Caching and invalidation](caching-and-invalidation.md). Declaring read-through cache in `.atl` and how writes invalidate it.
 - [Ephemeral data](ephemeral-data.md). Memcached-only typed data with TTL for short-lived scratch state.
+- [The sandbox](sandbox.md). In-process disposable schema with checkpoints, restore, fork, diff, and seed.
 - [Jobs and workflows](jobs-and-workflows.md). Typed background work: retries, DLQ, checkpointing, multi-step orchestration with compensation.
 - [Custom queries and procedures](custom-queries-and-procedures.md). The synchronous escape hatch for SQL the typed surface can't express.
 - [`tide` vs `tidectl`](tide-vs-tidectl.md). Which CLI runs where and why.

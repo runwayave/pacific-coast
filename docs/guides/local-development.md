@@ -85,3 +85,4 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 - [Adopt an existing database](adopt-an-existing-database.md) — provisioning the local Postgres clone atlantis runs against.
 - [Deploy to production](deploy-to-production.md) — the prod-shaped workflow with `source: git` and pinned refs.
 - [DSL grammar reference](../reference/dsl-grammar.md) — what goes inside the `.atl` files atlantis reads.
+- [Use the sandbox](use-the-sandbox.md) — disposable copies of the merged schema for testing queries against seeded data.

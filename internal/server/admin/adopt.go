@@ -96,8 +96,8 @@ type AdoptBaselineResponse struct {
 // FK refs that cross caller namespaces resolve naturally because the
 // IR lowering sees the full set.
 func (s *Service) AdoptBaseline(ctx context.Context, req AdoptBaselineRequest) (*AdoptBaselineResponse, error) {
-	if !s.allowApplyMutation {
-		return nil, errors.New("admin: adopt is disabled on this server (set ATL_ALLOW_APPLY_MUTATION=true to enable)")
+	if err := s.authorizeOperator(ctx); err != nil {
+		return nil, err
 	}
 	subs := req.Submissions
 	if len(subs) == 0 {

@@ -4,7 +4,7 @@ How each supported `.atl` field type maps to PostgreSQL, protobuf, and Go.
 
 ## Scope
 
-This page covers the types atlantis v0.1 supports. The following PostgreSQL types are not supported yet: `char(N)`; `time`, `timetz`, and `timestamp` without timezone; `inet`/`cidr`/`macaddr`; `money`; `tsvector`; `point`/`box`/`line`; `oid`; `xml`; `json` (use `jsonb`); `hstore`; `ltree`; enums; domains; composites; ranges. File an issue if you need one.
+This page covers the types atlantis currently supports. The following PostgreSQL types are not supported yet: `char(N)`; `time`, `timetz`, and `timestamp` without timezone; `inet`/`cidr`/`macaddr`; `money`; `tsvector`; `point`/`box`/`line`; `oid`; `xml`; `json` (use `jsonb`); `hstore`; `ltree`; enums; domains; composites; ranges. File an issue if you need one.
 
 ## Scalars
 

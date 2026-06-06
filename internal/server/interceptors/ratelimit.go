@@ -20,12 +20,13 @@ import (
 )
 
 // RateLimitConfig parameterises the token-bucket interceptor. Values come
-// from the server's config layer (loadConfig); defaults are picked so a
-// fresh deployment doesn't accidentally shed traffic before it's tuned.
+// from the server's config layer (loadConfig). The defaults (1000 qps,
+// 200 burst, 0.80 saturation cutoff) are loose enough that an
+// unconfigured single-tenant deployment never sheds on its own load —
+// operators dial them down per workload.
 type RateLimitConfig struct {
-	// DefaultQPS is the steady-state rate per caller when no per-caller
-	// override is set. 1000 is the starting recommendation for an internal
-	// service.
+	// DefaultQPS is the per-caller token-bucket refill rate when no
+	// per-caller override is set; overrides via RateLimitConfig.PerCaller.
 	DefaultQPS int
 	// Burst is the max tokens the bucket can accumulate; lets a brief
 	// burst exceed DefaultQPS as long as the average rate stays under.
@@ -72,9 +73,10 @@ func (c RateLimitConfig) withDefaults() RateLimitConfig {
 //     ResourceExhausted.
 //   - At/above the cutoff, requests that match isLowPriority are dropped
 //     unconditionally so the pool stays reserved for write-shaped
-//     traffic. v1 treats list/search RPCs as low priority and CRUD as
-//     high; once the DSL grows per-RPC priority annotations this becomes
-//     data-driven.
+//     traffic. Classification is hard-coded today: any RPC whose method
+//     name starts with `List` or `Search` is low priority; CRUD and Get
+//     never shed via this gate. A future DSL extension for per-RPC
+//     priority annotations would make this table-driven.
 //
 // The `pool` argument is the pgx pool the server uses for entity reads.
 // We never *call* the pool here — only inspect Stat() to decide whether

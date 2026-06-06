@@ -2,7 +2,7 @@ package codegen
 
 // defaultModulePrefix is the import path of the central atlantis-go SDK
 // module. Used when GenConfig.ModulePrefix is empty so the in-repo
-// `tidectl codegen` keeps emitting the same paths it always has.
+// `tide generate` keeps emitting the same paths it always has.
 const defaultModulePrefix = "github.com/rachitkumar205/atlantis-go"
 
 // GenConfig parameterizes the Go import paths the client emitters write.

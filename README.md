@@ -89,6 +89,7 @@ Supported:
 - pgvector with HNSW indexes
 - TimescaleDB hypertables
 - Custom queries and multi-step procedures
+- In-process sandbox runtime with checkpoints, fork, diff, seed, and snapshot (sim backend) plus an embedded Postgres backend for full SQL fidelity
 - mTLS between client and server
 
 Not yet supported: MySQL, non-Go client SDKs, multi-region deployments.

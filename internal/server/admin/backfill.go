@@ -90,14 +90,15 @@ type BackfillFieldStatus struct {
 // rather than inserting duplicates; resubmitting a completed plan
 // returns AlreadyComplete.
 func (s *Service) BeginBackfillPlan(ctx context.Context, req BeginBackfillPlanRequest) (*BeginBackfillPlanResponse, error) {
-	if !s.allowApplyMutation {
-		return nil, errors.New("admin: apply is disabled on this server (set ATL_ALLOW_APPLY_MUTATION=true to enable)")
+	if req.Caller == "" {
+		return nil, errors.New("admin: caller identity is required")
+	}
+	// Mutation gate + same-CN binding (see ApplyMigration for details).
+	if err := s.authorizeSelfApply(ctx, req.Caller); err != nil {
+		return nil, err
 	}
 	if !s.backfillEnabled {
 		return nil, errors.New("admin: backfill worker is disabled on this server (set ATL_BACKFILL_WORKER_ENABLED=true to enable)")
-	}
-	if req.Caller == "" {
-		return nil, errors.New("admin: caller identity is required")
 	}
 	if req.PlanID == "" {
 		return nil, errors.New("admin: plan_id is required")
@@ -189,7 +190,7 @@ VALUES ($1, $2, 'phase2_running', $3, $4, $5)`,
 
 	for _, f := range req.BackfillFields {
 		if f.PKColumn == "" {
-			return nil, fmt.Errorf("admin: backfill field %s.%s has no PK column (composite PKs unsupported in v1)",
+			return nil, fmt.Errorf("admin: backfill field %s.%s has no PK column (composite PKs are not supported by the backfill worker — split the field into a non-composite-PK entity or backfill manually)",
 				f.EntityID, f.Field)
 		}
 		if _, err := tx.Exec(ctx, `

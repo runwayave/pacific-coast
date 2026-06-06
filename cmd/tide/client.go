@@ -34,7 +34,7 @@ type adminClient struct {
 
 func dial(cfg *tideConfig) (*adminClient, error) {
 	var creds credentials.TransportCredentials
-	if cfg.TLS.Cert != "" {
+	if cfg.TLS.Cert != "" || cfg.TLS.CertPEM != "" {
 		var err error
 		creds, err = buildTLS(cfg)
 		if err != nil {
@@ -72,17 +72,42 @@ func (c *adminClient) invoke(ctx context.Context, method string, req, reply any)
 }
 
 func buildTLS(cfg *tideConfig) (credentials.TransportCredentials, error) {
-	cert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
-	if err != nil {
-		return nil, fmt.Errorf("load client cert: %w", err)
+	// Source the leaf cert + key. Inline PEM wins when set (config
+	// validation in loadPCConfig already rejected the both-set case);
+	// otherwise fall back to the file-path variant.
+	var (
+		cert tls.Certificate
+		err  error
+	)
+	if cfg.TLS.CertPEM != "" {
+		cert, err = tls.X509KeyPair([]byte(cfg.TLS.CertPEM), []byte(cfg.TLS.KeyPEM))
+		if err != nil {
+			return nil, fmt.Errorf("parse TIDE_TLS_CERT_PEM / TIDE_TLS_KEY_PEM: %w", err)
+		}
+	} else {
+		cert, err = tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert: %w", err)
+		}
 	}
-	caPEM, err := os.ReadFile(cfg.TLS.CA)
-	if err != nil {
-		return nil, fmt.Errorf("read CA: %w", err)
+
+	// CA trust anchor — same pattern.
+	var caPEM []byte
+	if cfg.TLS.CAPEM != "" {
+		caPEM = []byte(cfg.TLS.CAPEM)
+	} else {
+		caPEM, err = os.ReadFile(cfg.TLS.CA)
+		if err != nil {
+			return nil, fmt.Errorf("read CA: %w", err)
+		}
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("CA %s contains no usable certs", cfg.TLS.CA)
+		src := cfg.TLS.CA
+		if cfg.TLS.CAPEM != "" {
+			src = "TIDE_TLS_CA_PEM"
+		}
+		return nil, fmt.Errorf("CA %s contains no usable certs", src)
 	}
 	return credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{cert},

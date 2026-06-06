@@ -589,7 +589,7 @@ func Lower(files []*File) (*IR, error) {
 	// Pass 1: collect entities first. QueryDecl/ProcedureDecl lowering
 	// depends on every entity being resolvable, so we deliberately make
 	// two parser-AST passes — one for entities, one for queries +
-	// procedures. Other decl shapes (future enum/view) would slot into
+	// procedures. New top-level decl shapes that don't reference other entities slot into
 	// pass 1 alongside entities.
 	//
 	// File-source paths are threaded into custom queries/procedures so
@@ -1495,7 +1495,7 @@ func DecodeJSONIR(data []byte) (*IR, error) {
 // referring to real entities) lives in the pg_query_go validator,
 // which runs at plan time. Lowering keeps this function lean enough
 // that codegen tests can run without CGO; the deeper SQL validation
-// is layered on top by tidectl plan.
+// is layered on top by tide plan.
 func lowerQuery(path string, d *QueryDecl, byID map[string]*Entity) (*CustomQuery, []error) {
 	var errs []error
 	// Resolve the target entity. An unqualified name binds to the

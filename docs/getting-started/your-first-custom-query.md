@@ -45,5 +45,6 @@ If the canonical text comes back, the query is live in the merged schema.
 
 - [Custom queries and procedures](../concepts/custom-queries-and-procedures.md) — when to reach for `query` vs `procedure` and how `touches(...)` keeps the cache consistent.
 - [DSL grammar](../reference/dsl-grammar.md) — the full `query` and `procedure` syntax.
+- [Use the sandbox](../guides/use-the-sandbox.md) — paste the query body into a disposable sandbox to verify the result shape before `tide apply`.
 
-Calling `NoteCountByMonth` from a Go program requires the typed client, which is a manual `buf generate` step in v0.1; v0.2 wires this into `tide apply`.
+Calling `NoteCountByMonth` from a Go program needs the typed client; run `tide generate` from your caller repo to write it into the module declared by `tide.yaml`'s `output_dir`.

@@ -32,10 +32,9 @@ func New(mc MemcachedClient) *Cache {
 	return &Cache{mc: mc}
 }
 
-// Generation returns the current generation counter for entity. A counter
-// that's never been bumped reads as 0; that's a stable starting point
-// (any subsequent bump moves it to >= 1, retiring every cache entry
-// hashed with gen=0).
+// Generation returns the current generation counter for entity.
+// 0 means no bumps have ever been recorded; the first bump moves
+// it to >= 1, retiring every cache entry hashed with gen=0.
 func (c *Cache) Generation(ctx context.Context, entity string) (int64, error) {
 	if c == nil {
 		return 0, nil

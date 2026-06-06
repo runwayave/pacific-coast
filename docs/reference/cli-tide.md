@@ -65,7 +65,7 @@ tide apply [--backfill <file>] [--dry-run] [--no-pull]
 
 | Flag | Description |
 |---|---|
-| `--backfill <file>` | Accepted for forward compatibility with backfill-required plans. v0.1 does not splice the file into the migration; the caller applies the SQL manually before re-running `tide apply`. |
+| `--backfill <file>` | Accepted for forward compatibility with backfill-required plans. The server does not yet splice the file into the migration; the caller applies the SQL manually before re-running `tide apply`. |
 | `--dry-run` | Plan only; do not apply. Same exit codes as a real apply. |
 | `--no-pull` | Skip the automatic `tide pull` before the apply. Use when offline or when the local cache is known-current. |
 

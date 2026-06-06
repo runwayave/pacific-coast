@@ -1,4 +1,4 @@
-// pc — caller-side CLI invoked from inside backend / vendor-platform repos.
+// tide — caller-side CLI invoked from inside backend / vendor-platform repos.
 //
 //	tide apply [--no-pull]                     submit + apply this repo's .atl files
 //	tide apply --backfill                      kick off declarative backfill for a backfill_required plan
@@ -26,7 +26,7 @@
 // Network transport is hand-rolled JSON-over-gRPC; mTLS material is loaded
 // from TIDE_TLS_* env vars or tide.yaml. The server side
 // (internal/server/admin/grpc.go) speaks the same JSON envelope; this keeps
-// `pc` independent of buf-generated stubs.
+// tide independent of buf-generated stubs.
 package main
 
 import (
@@ -34,7 +34,11 @@ import (
 	"os"
 )
 
-const version = "0.1.0"
+// version is set at build time via -ldflags "-X main.version=v0.X.Y".
+// The default "dev" surfaces when run from a non-release build (go run,
+// go install from source, IDE) so operators don't mistake an
+// uninstalled binary for a release.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -70,6 +74,8 @@ func main() {
 		os.Exit(cmdOwners(os.Args[2:]))
 	case "rollback":
 		os.Exit(cmdRollback(os.Args[2:]))
+	case "sandbox":
+		os.Exit(cmdSandbox(os.Args[2:]))
 	case "version":
 		fmt.Println("tide", version)
 	default:

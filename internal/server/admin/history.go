@@ -33,6 +33,7 @@ type SchemaVersionSummary struct {
 	EventType   string `json:"event_type"`
 	ChangeCount int    `json:"change_count"`
 	CreatedAt   string `json:"created_at"`
+	IRHash      string `json:"ir_hash"` // sha256 of the IR snapshot; git-style content address
 }
 
 // GetSchemaHistoryResponse carries one page of versions plus a flag
@@ -54,28 +55,28 @@ func (s *Service) GetSchemaHistory(ctx context.Context, req GetSchemaHistoryRequ
 	var err error
 	if req.Caller != "" && req.Before > 0 {
 		rows, err = s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at
+SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
 FROM atlantis.schema_versions
 WHERE version < $1 AND caller = $2
 ORDER BY version DESC
 LIMIT $3`, req.Before, req.Caller, fetchLimit)
 	} else if req.Caller != "" {
 		rows, err = s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at
+SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
 FROM atlantis.schema_versions
 WHERE caller = $1
 ORDER BY version DESC
 LIMIT $2`, req.Caller, fetchLimit)
 	} else if req.Before > 0 {
 		rows, err = s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at
+SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
 FROM atlantis.schema_versions
 WHERE version < $1
 ORDER BY version DESC
 LIMIT $2`, req.Before, fetchLimit)
 	} else {
 		rows, err = s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at
+SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
 FROM atlantis.schema_versions
 ORDER BY version DESC
 LIMIT $1`, fetchLimit)
@@ -90,7 +91,7 @@ LIMIT $1`, fetchLimit)
 		var v SchemaVersionSummary
 		var diffJSON []byte
 		var createdAt interface{}
-		if err := rows.Scan(&v.Version, &v.Caller, &v.PlanClass, &v.EventType, &diffJSON, &createdAt); err != nil {
+		if err := rows.Scan(&v.Version, &v.Caller, &v.PlanClass, &v.EventType, &diffJSON, &createdAt, &v.IRHash); err != nil {
 			return nil, err
 		}
 		v.CreatedAt = fmt.Sprintf("%v", createdAt)
@@ -145,6 +146,7 @@ type GetSchemaVersionResponse struct {
 	IRSnapshot json.RawMessage `json:"ir_snapshot"`
 	CreatedAt  string          `json:"created_at"`
 	ParentVer  *int64          `json:"parent_version,omitempty"`
+	IRHash     string          `json:"ir_hash"`
 }
 
 func (s *Service) GetSchemaVersion(ctx context.Context, req GetSchemaVersionRequest) (*GetSchemaVersionResponse, error) {
@@ -155,12 +157,12 @@ func (s *Service) GetSchemaVersion(ctx context.Context, req GetSchemaVersionRequ
 	var createdAt interface{}
 	err := s.pool.QueryRow(ctx, `
 SELECT version, caller, plan_class, event_type, diff, up_sql, down_sql,
-       ir_snapshot, created_at, parent_version
+       ir_snapshot, created_at, parent_version, ir_hash
 FROM atlantis.schema_versions
 WHERE version = $1`, req.Version).Scan(
 		&resp.Version, &resp.Caller, &resp.PlanClass, &resp.EventType,
 		&resp.Diff, &resp.UpSQL, &resp.DownSQL,
-		&resp.IRSnapshot, &createdAt, &resp.ParentVer,
+		&resp.IRSnapshot, &createdAt, &resp.ParentVer, &resp.IRHash,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -351,8 +353,8 @@ type RollbackSchemaResponse struct {
 }
 
 func (s *Service) RollbackSchema(ctx context.Context, req RollbackSchemaRequest) (*RollbackSchemaResponse, error) {
-	if !s.allowApplyMutation {
-		return nil, errors.New("admin: rollback is disabled on this server (set ATL_ALLOW_APPLY_MUTATION=true to enable)")
+	if err := s.authorizeOperator(ctx); err != nil {
+		return nil, err
 	}
 	if req.ToVersion <= 0 {
 		return nil, errors.New("admin: to_version must be a positive integer")
@@ -435,5 +437,83 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.ToVers
 	return &RollbackSchemaResponse{
 		NewVersion: version,
 		UpSQL:      scripts.Up,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// PreviewRollback — compute the SQL a rollback would execute, without
+//                   executing or persisting anything
+// ---------------------------------------------------------------------------
+
+type PreviewRollbackRequest struct {
+	ToVersion int64 `json:"to_version"`
+}
+
+type PreviewRollbackResponse struct {
+	TargetVersion  int64  `json:"target_version"`
+	CurrentVersion int64  `json:"current_version"`
+	UpSQL          string `json:"up_sql"`     // SQL that would run on execute
+	PlanClass      string `json:"plan_class"` // additive / backfill_required / cross_caller_breaking
+	ChangeCount    int    `json:"change_count"`
+}
+
+// PreviewRollback returns the SQL a RollbackSchema call would execute,
+// plus its plan class and change count, without taking the advisory lock
+// or writing anything. Same auth as RollbackSchema (operator-only) since
+// the response reveals schema structure that's already operator-gated
+// via every other admin RPC.
+//
+// Read race: a concurrent apply or rollback between this call and the
+// real one will produce different SQL at execution time. Acceptable —
+// the user clicks Execute after reviewing, and the real RPC recomputes
+// from a fresh consistent snapshot inside its own transaction. The
+// preview is informational; the executing call is authoritative.
+func (s *Service) PreviewRollback(ctx context.Context, req PreviewRollbackRequest) (*PreviewRollbackResponse, error) {
+	if err := s.authorizeOperator(ctx); err != nil {
+		return nil, err
+	}
+	if req.ToVersion <= 0 {
+		return nil, errors.New("admin: to_version must be a positive integer")
+	}
+
+	var targetIRRaw []byte
+	err := s.pool.QueryRow(ctx, `
+SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.ToVersion).Scan(&targetIRRaw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("admin: schema version %d not found", req.ToVersion)
+		}
+		return nil, fmt.Errorf("load target version: %w", err)
+	}
+	targetIR, err := dsl.DecodeJSONIR(targetIRRaw)
+	if err != nil {
+		return nil, fmt.Errorf("decode target IR: %w", err)
+	}
+
+	currentIR, err := s.loadCheckpoint(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load current checkpoint: %w", err)
+	}
+	if currentIR == nil {
+		return nil, errors.New("admin: no current checkpoint to rollback from")
+	}
+
+	var currentVersion int64
+	_ = s.pool.QueryRow(ctx,
+		`SELECT MAX(version) FROM atlantis.schema_versions`).Scan(&currentVersion)
+
+	codegen.AssignProtoNumbers(currentIR, targetIR)
+	d := codegen.ComputeDiff(currentIR, targetIR)
+	scripts, err := codegen.EmitSQL(currentIR, targetIR, d)
+	if err != nil {
+		return nil, fmt.Errorf("emit rollback sql: %w", err)
+	}
+
+	return &PreviewRollbackResponse{
+		TargetVersion:  req.ToVersion,
+		CurrentVersion: currentVersion,
+		UpSQL:          scripts.Up,
+		PlanClass:      d.HighestClass().String(),
+		ChangeCount:    len(d.Additive) + len(d.BackfillRequired) + len(d.Breaking),
 	}, nil
 }

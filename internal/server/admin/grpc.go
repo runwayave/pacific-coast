@@ -74,6 +74,13 @@ type AdminServer interface {
 	GetEntityLineage(context.Context, GetEntityLineageRequest) (*GetEntityLineageResponse, error)
 	GetEntityOwners(context.Context, GetEntityOwnersRequest) (*GetEntityOwnersResponse, error)
 	RollbackSchema(context.Context, RollbackSchemaRequest) (*RollbackSchemaResponse, error)
+	PreviewRollback(context.Context, PreviewRollbackRequest) (*PreviewRollbackResponse, error)
+	GetCallerFiles(context.Context, GetCallerFilesRequest) (*GetCallerFilesResponse, error)
+	GetCallers(context.Context, GetCallersRequest) (*GetCallersResponse, error)
+	RegisterCaller(context.Context, RegisterCallerRequest) (*RegisterCallerResponse, error)
+	RevokeCaller(context.Context, RevokeCallerRequest) (*RevokeCallerResponse, error)
+	RecordCallerCertExpiry(context.Context, RecordCallerCertExpiryRequest) (*RecordCallerCertExpiryResponse, error)
+	GetLogs(context.Context, GetLogsRequest) (*GetLogsResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -114,6 +121,13 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "GetEntityLineage", Handler: handleGetEntityLineage},
 		{MethodName: "GetEntityOwners", Handler: handleGetEntityOwners},
 		{MethodName: "RollbackSchema", Handler: handleRollbackSchema},
+		{MethodName: "PreviewRollback", Handler: handlePreviewRollback},
+		{MethodName: "GetCallerFiles", Handler: handleGetCallerFiles},
+		{MethodName: "GetCallers", Handler: handleGetCallers},
+		{MethodName: "RegisterCaller", Handler: handleRegisterCaller},
+		{MethodName: "RevokeCaller", Handler: handleRevokeCaller},
+		{MethodName: "RecordCallerCertExpiry", Handler: handleRecordCallerCertExpiry},
+		{MethodName: "GetLogs", Handler: handleGetLogs},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "atlantis/admin/v1/admin.proto",
@@ -734,6 +748,220 @@ func handleRollbackSchema(srv any, ctx context.Context, dec func(any) error, int
 
 func invokeRollbackSchema(svc *Service, ctx context.Context, req *RollbackSchemaRequest) (any, error) {
 	resp, err := svc.RollbackSchema(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handlePreviewRollback(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req PreviewRollbackRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokePreviewRollback(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/PreviewRollback"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokePreviewRollback(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokePreviewRollback(svc *Service, ctx context.Context, req *PreviewRollbackRequest) (any, error) {
+	resp, err := svc.PreviewRollback(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetCallerFiles(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetCallerFilesRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeGetCallerFiles(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetCallerFiles"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetCallerFiles(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetCallerFiles(svc *Service, ctx context.Context, req *GetCallerFilesRequest) (any, error) {
+	resp, err := svc.GetCallerFiles(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetCallers(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetCallersRequest
+	if interceptor == nil {
+		return invokeGetCallers(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetCallers"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetCallers(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetCallers(svc *Service, ctx context.Context, req *GetCallersRequest) (any, error) {
+	resp, err := svc.GetCallers(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleRegisterCaller(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req RegisterCallerRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeRegisterCaller(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/RegisterCaller"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeRegisterCaller(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeRegisterCaller(svc *Service, ctx context.Context, req *RegisterCallerRequest) (any, error) {
+	resp, err := svc.RegisterCaller(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleRevokeCaller(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req RevokeCallerRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeRevokeCaller(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/RevokeCaller"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeRevokeCaller(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeRevokeCaller(svc *Service, ctx context.Context, req *RevokeCallerRequest) (any, error) {
+	resp, err := svc.RevokeCaller(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleRecordCallerCertExpiry(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req RecordCallerCertExpiryRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeRecordCallerCertExpiry(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/RecordCallerCertExpiry"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeRecordCallerCertExpiry(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeRecordCallerCertExpiry(svc *Service, ctx context.Context, req *RecordCallerCertExpiryRequest) (any, error) {
+	resp, err := svc.RecordCallerCertExpiry(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetLogs(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetLogsRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeGetLogs(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetLogs"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetLogs(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetLogs(svc *Service, ctx context.Context, req *GetLogsRequest) (any, error) {
+	resp, err := svc.GetLogs(ctx, *req)
 	if err != nil {
 		return nil, err
 	}

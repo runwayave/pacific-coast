@@ -47,7 +47,10 @@ CREATE INDEX IF NOT EXISTS entity_lineage_entity_idx
     ON atlantis.entity_lineage (entity_id);
 
 -- Seed from existing checkpoint so a running system gets a baseline
--- version without requiring a manual re-apply.
+-- version (version=1) without requiring a manual re-apply. Conditional
+-- on schema_versions being empty — never re-seeds, so a TRUNCATE +
+-- re-up would advance the BIGSERIAL past 1 and orphan any callers'
+-- snapshotted parent_version references.
 INSERT INTO atlantis.schema_versions
     (caller, plan_class, diff, ir_snapshot, ir_hash, event_type)
 SELECT

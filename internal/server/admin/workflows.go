@@ -98,7 +98,7 @@ RETURNING id`, req.WorkflowName, []byte(state), req.SubmittedBy).Scan(&id)
 	// StartWorkflow caller (the operator or SDK) to know that the
 	// workflow engine's post-insert hook fires on the worker side.
 	//
-	// For v1 we directly enqueue the first step here so the workflow
+	// Enqueue the first step here so the workflow
 	// starts immediately without waiting for a trigger.
 	for _, wf := range ir.Workflows {
 		if wf.ID() != req.WorkflowName || len(wf.Steps) == 0 {

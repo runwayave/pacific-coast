@@ -293,8 +293,8 @@ type claimedRow struct {
 //   - scheduled_for has passed
 //
 // The lease is set to claimed_until = now() + HeartbeatBudget. We
-// rely on the budget being conservative for v1; long-running jobs
-// can use Phase 2's checkpoint API to extend the lease themselves.
+// rely on the budget being conservative; long-running jobs
+// can use the checkpoint API to extend the lease themselves.
 func (w *Worker) claim(ctx context.Context) ([]claimedRow, error) {
 	leaseDeadline := time.Now().Add(w.cfg.HeartbeatBudget)
 	const sqlClaim = `
@@ -355,8 +355,8 @@ RETURNING j.id, j.job_name, j.args, j.attempts, j.max_retries,
 //     backoff in claim's predicate, added in a later iteration).
 //
 // Heartbeat: handlers that need more than HeartbeatBudget should
-// extend the lease via the checkpoint API (added with Phase 2's
-// long-running-jobs work). v1 callers should keep timeouts within
+// extend the lease via the checkpoint API. Callers without the
+// checkpoint wiring should keep their timeouts within
 // HeartbeatBudget.
 func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
 	handler := w.registry.Lookup(r.jobName)
