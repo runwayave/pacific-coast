@@ -8,7 +8,9 @@ Environment variables read by the Atlantis server. The full list lives in `cmd/s
 
 ## Reloading and precedence
 
-All variables are read once at startup. Changes require a restart; `SIGHUP` is not handled.
+All variables are read once at startup. Changes require a restart; `SIGHUP` is not handled. Process environment wins over `.env`-file values; no other source is read.
+
+Parse errors are silent: `PG_MAX_CONNS=fifty` runs with the default of `50` and never warns. The startup config dump (info-level log line `config_loaded`) is the only confirmation that your override took effect.
 
 ## gRPC listener
 
@@ -34,22 +36,22 @@ The three TLS variables must be set together or all left empty. A partial set is
 
 Durations use Go syntax (`5m`, `30s`, `1h`, `500ms`).
 
-`PG_QUERY_TIMEOUT_DEFAULT` is the default per-query context deadline applied at the storage layer. A query that exceeds it is cancelled via Postgres `statement_timeout`. Per-RPC override is not yet supported in v0.1.
+`PG_QUERY_TIMEOUT_DEFAULT` is the default per-query deadline at the storage layer, enforced via Go context. When the deadline fires, pgx aborts the in-flight query. Raise it for legitimately slow analytical reads; lower it and a runaway query can't pin a pool connection. Per-RPC override is not yet supported.
 
 ## Memcached
 
 | Variable | Default | Notes |
 |---|---|---|
-| `MEMCACHED_ADDR` | `localhost:11211` | Comma-separated for multiple nodes. |
-| `MEMCACHED_TIMEOUT` | `100ms` | Per-operation timeout. |
+| `MEMCACHED_ADDR` | `localhost:11211` | Comma-separated for multiple nodes. The `localhost` default fits dev only; production must point at a real memcached, otherwise every read falls through to Postgres with no warning. |
+| `MEMCACHED_TIMEOUT` | `100ms` | Per-operation timeout. A node past this deadline causes a cache miss (the read falls through to Postgres) rather than a request error. Raise it to absorb GC pauses on the memcached box. |
 
 ## Cache
 
 | Variable | Default | Notes |
 |---|---|---|
-| `CACHE_LRU_SIZE` | `1024` | In-process LRU size in front of memcached. |
+| `CACHE_LRU_SIZE` | `1024` | Process-wide tier-0 LRU shared across every entity (keys are `entity/id`). Sits in front of memcached. |
 | `CACHE_DEFAULT_TTL` | `10m` | Default TTL when an entity's `cache { ... }` block does not declare `ttl=`. |
-| `CACHE_XFETCH_BETA` | `1.0` | Probabilistic early-refresh beta (Vattani et al. 2015). `0` disables; `1.0` is the canonical default; values much above `2` cause aggressive refresh. |
+| `CACHE_XFETCH_BETA` | `1.0` | Probabilistic early-refresh beta. `0` disables (TTL becomes a hard expiry); `1.0` is the published default; `>2` trades cache hits for fewer thundering-herd reloads. Tune only if you see synchronised expiry spikes in the cache-miss histogram. |
 
 ## Outbox worker
 
@@ -58,16 +60,16 @@ Durations use Go syntax (`5m`, `30s`, `1h`, `500ms`).
 | `OUTBOX_BATCH_SIZE` | `100` | Rows processed per worker tick. |
 | `OUTBOX_DRAIN_INTERVAL` | `250ms` | Time between worker ticks. |
 | `OUTBOX_ALERT_LAG` | `5m` | The worker emits a warning log line when the oldest unprocessed row is older than this. |
-| `OUTBOX_POINTER_TTL` | `24h` | TTL on body-cache pointer keys. |
+| `OUTBOX_POINTER_TTL` | `24h` | Memcached TTL on body-cache pointer keys. Must exceed your longest reasonable read latency under load; an expired pointer forces the next reader to refetch from Postgres. |
 
 ## Rate limiting
 
 | Variable | Default | Notes |
 |---|---|---|
-| `RATE_LIMIT_DEFAULT_QPS` | `1000` | Per-caller QPS when no override applies. |
-| `RATE_LIMIT_BURST` | `200` | Token-bucket burst capacity. |
-| `RATE_LIMIT_PER_CALLER` | (unset) | Comma-separated `caller=qps` overrides. |
-| `RATE_LIMIT_SATURATION_CUTOFF` | `0.80` | Acquired-conns / max-conns ratio at which low-priority RPCs start shedding. |
+| `RATE_LIMIT_DEFAULT_QPS` | `1000` | Token-bucket refill rate per caller without a `RATE_LIMIT_PER_CALLER` entry. |
+| `RATE_LIMIT_BURST` | `200` | Maximum bucket capacity (the largest instantaneous burst allowed before throttling). A caller out of tokens gets `RESOURCE_EXHAUSTED`. |
+| `RATE_LIMIT_PER_CALLER` | (unset) | Comma-separated `caller=qps` overrides. The self-host compose bundle seeds this with `atlantis-console=${CONSOLE_RATE_LIMIT_QPS:-5000}`; setting it via env replaces the seed entirely. |
+| `RATE_LIMIT_SATURATION_CUTOFF` | `0.80` | Pool-saturation threshold. When pgxpool `AcquiredConns/MaxConns` crosses this, the server returns `RESOURCE_EXHAUSTED` on low-priority RPCs (today hard-coded as method names starting with `List` or `Search`; CRUD and Get never shed). Set to `0` to disable shedding entirely — Postgres then becomes your only backpressure. |
 
 `RATE_LIMIT_PER_CALLER` format: `caller1=qps1,caller2=qps2`. Whitespace around tokens is trimmed. Pairs where the QPS does not parse as a positive integer, or where the `caller=` form is malformed, are silently dropped. Check startup logs to confirm the parsed map.
 
@@ -78,29 +80,23 @@ Durations use Go syntax (`5m`, `30s`, `1h`, `500ms`).
 | `AUTO_MIGRATE` | `false` | Apply pending migrations on boot. |
 | `MIGRATIONS_DIR` | `migrations` | Directory passed to the bundled migrate runner. Resolved relative to the server's working directory. |
 
-Production should leave `AUTO_MIGRATE=false` and run migrations explicitly as a deploy step.
+Set `AUTO_MIGRATE=false` in production. Boot-time migrations race rolling restarts: golang-migrate serializes on a Postgres advisory lock, but a losing replica crash-loops until the leader finishes — visible to your orchestrator as a flapping pod.
 
 ## Admin RPC gating
 
-`ATL_ALLOW_APPLY_MUTATION` is the kill switch for the `ApplyMigration` RPC. When `false`, the server rejects mutation submissions; the plan and pull RPCs remain available so caller-side validation still works.
+`ATL_ALLOW_APPLY_MUTATION` selects the schema-change flow. Default (`true`) is the per-caller-CI flow: callers run `tide apply` against the server and the server runs the DDL + IR write under an advisory lock. Set to `false` only when a regulator requires literal SQL review on a deployment-repo PR before any database change (SOX, HIPAA, PCI). The plan and pull RPCs remain available regardless. See [schema flow](../architecture/schema-flow.md) for the two flows in full.
+
+Three independent gates grant mutation permission:
+
+- `ATL_ALLOW_APPLY_MUTATION=true` — wildcard grant for any authenticated caller.
+- `ATL_MUTATION_ALLOWED_CALLERS` — per-CN allowlist, comma-separated. Use it in regulated deployments to scope mutations to specific CI cert CNs.
+- `caller_identities.can_mutate=true` — runtime per-caller flag (set via the console) so operators can grant mutation permission without an env-var change.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ATL_ALLOW_APPLY_MUTATION` | `false` | Gates the `ApplyMigration` RPC. Must be `false` in production. |
-
-## Schema hot-reload
-
-The server automatically listens for schema changes via PostgreSQL `LISTEN/NOTIFY`. When `tide apply` persists a new IR checkpoint, a trigger fires `pg_notify('atl_schema_changed', content_hash)`. The server's schema listener rebuilds entity metadata and swaps it atomically. No configuration is needed — hot-reload is always active.
-
-Prometheus metrics exposed:
-
-| Metric | Type | Description |
-|---|---|---|
-| `atlantis_schema_reloads_total` | counter | Successful hot-reloads. |
-| `atlantis_schema_reload_errors_total` | counter | Failed reload attempts (logged, old schema stays active). |
-| `atlantis_schema_reload_duration_seconds` | histogram | Time to rebuild entity metadata. |
-
-Hot-reload covers field additions/removals, type changes, custom query changes, and constraint changes to existing entities. Adding a brand-new entity requires a rolling restart because gRPC services are registered once at startup.
+| `ATL_ALLOW_APPLY_MUTATION` | `true` | Gates the `ApplyMigration` RPC. Default flow accepts mutations from any authenticated caller; the diff classifier and per-caller cert identity stop one caller from breaking another. Set to `false` for the regulated opt-in. |
+| `ATL_MUTATION_ALLOWED_CALLERS` | (empty) | Comma-separated CN allowlist. Empty = no per-CN exceptions. |
+| `ATL_OPERATOR_ALLOWED_CALLERS` | (empty) | Operator-only RPCs (`RevokeCaller`, `RollbackSchema`, `AdoptBaseline`). Empty falls back to `ATL_ALLOW_APPLY_MUTATION`. The self-host compose bundle defaults this to `atlantis-console` so operator actions from the console work without an extra env step. |
 
 ## Schema mirror (dev only)
 
@@ -110,6 +106,33 @@ These variables enable the local-development workflow where the server mirrors c
 |---|---|---|
 | `ATL_MIRROR_SCHEMA` | `false` | When `true`, the server writes each successful `ApplyMigration` submission to `ATL_MIRROR_DIR`, partitioned by caller. |
 | `ATL_MIRROR_DIR` | `schema` | Destination for mirrored caller files. Ignored when `ATL_MIRROR_SCHEMA=false`. |
+
+## Console BFF
+
+Read by `cmd/console`, not the Atlantis server. The self-host compose bundle wires these through `${VAR:-default}` substitutions in `docker-compose.self-host.yml`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `CONSOLE_LISTEN` | `:3000` | Bind address for the BFF + SPA. |
+| `CONSOLE_PG_URL` | (unset; required) | Connection string for the BFF's audit / session tables. The bundle points this at the same Postgres instance, separate schema. |
+| `CONSOLE_SESSION_SECRET` | (unset; required, ≥32 chars) | HMAC key for session cookies. Console refuses to start below 32 chars, so `changeme` placeholders trip a fatal startup error — set this before first boot. |
+| `CONSOLE_COOKIE_SECURE` | `false` | Sets the `Secure` flag on session cookies. Default false so `http://localhost` works for first boot; flip to `true` once a TLS terminator (reverse proxy, LB) sits in front. |
+| `CONSOLE_AUDIT_RETENTION_DAYS` | `365` | Audit-row retention. Covers the typical SOC 2 audit window and PCI DSS §10.5.1's 12-month online minimum. HIPAA = 2190 (6 years); SOX = 2555 (7 years). `0` keeps every partition forever. |
+| `ATL_ENDPOINT` | `localhost:9090` | atlantis-server endpoint the BFF dials over mTLS. |
+| `ATL_TLS_CERT`, `ATL_TLS_KEY`, `ATL_TLS_CA` | (unset) | Client cert / key / CA for the BFF's mTLS connection to atlantis-server. |
+| `ATL_HEALTH_LISTEN` | `localhost:8081` | atlantis-server HTTP health endpoint the BFF surfaces on the console's Health page. |
+| `ATL_SIGNER_ADDR` | (unset) | Signer HTTP endpoint for cert issuance from the console's Callers page. |
+| `GITHUB_TOKEN` | (unset) | Fine-grained PAT for the "Open PR" button on the Schema page. Needs `contents:write` + `pull_requests:write` on each caller repo. Unset disables the button (preview still works). |
+| `SANDBOX_PER_USER_LIMIT` | `3` | Maximum concurrent sandboxes per authenticated user. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
+| `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
+
+The 256 MiB cap on `PUT /api/sandbox/{id}/snapshot` is a compile-time constant, not configurable. See [Sandbox HTTP API](sandbox-api.md#limits).
+
+## Observability
+
+| Variable | Default | Notes |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP gRPC collector endpoint (e.g. `otel-collector:4317`). Empty disables OTel export; Prometheus metrics on `:8081/metrics` and structured logs are unaffected. |
 
 ## Logging
 
@@ -121,7 +144,7 @@ These variables enable the local-development workflow where the server mirrors c
 
 Booleans accept `1`, `true`, `yes`, `on` (case-insensitive) for true and `0`, `false`, `no`, `off` for false.
 
-All typed variables (int, float, duration, bool) silently fall back to their default on parse error. `PG_MAX_CONNS=fifty` produces `50` with no warning. Check the startup config dump to confirm the parsed value.
+All typed variables (int, float, duration, bool) silently fall back to their default on parse error — see [Reloading and precedence](#reloading-and-precedence) above for how to verify your value actually took effect.
 
 ## Shutdown
 
@@ -139,7 +162,7 @@ ATL_ALLOW_APPLY_MUTATION=true
 LOG_LEVEL=debug
 ```
 
-## Example: production
+## Example: production (default flow)
 
 ```
 PG_URL=postgres://atlantis@db.internal:5432/atlantis?sslmode=require
@@ -150,6 +173,16 @@ TLS_KEY_FILE=/etc/atlantis/tls.key
 TLS_CA_FILE=/etc/atlantis/ca.crt
 AUTO_MIGRATE=false
 ATL_MIRROR_SCHEMA=false
-ATL_ALLOW_APPLY_MUTATION=false
+ATL_ALLOW_APPLY_MUTATION=true
 LOG_LEVEL=info
+```
+
+## Example: production (regulated opt-in)
+
+For SOX, HIPAA, or PCI workloads that require literal SQL review before any database change:
+
+```
+# ...same as above, except:
+ATL_ALLOW_APPLY_MUTATION=false
+ATL_MUTATION_ALLOWED_CALLERS=ci.deploy.internal   # optional: tighten further
 ```

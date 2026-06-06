@@ -73,17 +73,37 @@ type config struct {
 	// schema. Off in production; the binary never touches its own
 	// checkout there.
 	//
-	// AdminAllowApplyMutation gates the ApplyMigration RPC entirely. Off
-	// by default so production servers reject mutations from arbitrary
-	// callers — schema changes flow through the gated CI pipeline. Read-
-	// only admin RPCs (plan, pull) remain available regardless.
+	// AdminAllowApplyMutation gates the ApplyMigration RPC. On by
+	// default: caller CI runs `tide apply` against this server, the
+	// server applies the DDL and persists the new IR checkpoint under
+	// an advisory lock. Per-caller cert identity is pinned by mTLS and
+	// the diff classifier prevents one caller from breaking another's
+	// schema. Set to false only for regulated workloads (SOX/HIPAA/PCI)
+	// that require literal SQL review before any production database
+	// change — schema changes then flow through a PR against the
+	// atlantis deployment repo. Read-only admin RPCs (plan, pull)
+	// remain available regardless.
 	AdminMirrorSchema       bool
 	AdminMirrorDir          string
 	AdminAllowApplyMutation bool
 
+	// AdminMutationAllowedCallers is the per-CN allowlist for mutating
+	// admin RPCs (ApplyMigration, BeginBackfillPlan). Use it in
+	// regulated deployments (AdminAllowApplyMutation=false) to scope
+	// mutations to specific CI cert CNs, or in default deployments to
+	// tighten the wildcard. Empty = no per-CN exceptions; only
+	// AdminAllowApplyMutation grants permission.
+	AdminMutationAllowedCallers []string
+
+	// AdminOperatorAllowedCallers gates operator-only mutating admin
+	// RPCs (RevokeCaller, RollbackSchema, AdoptBaseline). Typically just
+	// the console's cert CN. Empty = fall back to AdminAllowApplyMutation
+	// for backward compatibility.
+	AdminOperatorAllowedCallers []string
+
 	// BackfillWorkerEnabled toggles the chunked-UPDATE backfill worker
-	// + the BeginBackfillPlan admin RPC. Default false in v0.1.0 until
-	// the feature is canaried in staging.
+	// + the BeginBackfillPlan admin RPC. Default false until the feature
+	// is canaried in staging.
 	BackfillWorkerEnabled bool
 
 	// JobsWorkerEnabled toggles the declarative-job worker pool. Default
@@ -105,6 +125,11 @@ type config struct {
 
 	// Observability
 	LogLevel string
+
+	// LogRingSize is the in-process slog ring buffer the console's
+	// Health page tail reads from. Power-of-two; default 8192. Memory
+	// cost ≈ size × 400 B.
+	LogRingSize int
 
 	// Health HTTP server (k8s probes hit this on a separate port).
 	HealthAddr         string
@@ -149,9 +174,11 @@ func loadConfig() (config, error) {
 		AutoMigrate:   envBool("AUTO_MIGRATE", false),
 		MigrationsDir: envStr("MIGRATIONS_DIR", "migrations"),
 
-		AdminMirrorSchema:       envBool("ATL_MIRROR_SCHEMA", false),
-		AdminMirrorDir:          envStr("ATL_MIRROR_DIR", "schema"),
-		AdminAllowApplyMutation: envBool("ATL_ALLOW_APPLY_MUTATION", false),
+		AdminMirrorSchema:           envBool("ATL_MIRROR_SCHEMA", false),
+		AdminMirrorDir:              envStr("ATL_MIRROR_DIR", "schema"),
+		AdminAllowApplyMutation:     envBool("ATL_ALLOW_APPLY_MUTATION", true),
+		AdminMutationAllowedCallers: splitCSV(os.Getenv("ATL_MUTATION_ALLOWED_CALLERS")),
+		AdminOperatorAllowedCallers: splitCSV(os.Getenv("ATL_OPERATOR_ALLOWED_CALLERS")),
 
 		BackfillWorkerEnabled: envBool("ATL_BACKFILL_WORKER_ENABLED", false),
 
@@ -159,7 +186,8 @@ func loadConfig() (config, error) {
 		JobsQueues:         splitCSV(envStr("ATL_JOBS_QUEUES", "default")),
 		JobsRemoteHandlers: parseRemoteHandlers(envStr("ATL_JOBS_REMOTE_HANDLERS", "")),
 
-		LogLevel: envStr("LOG_LEVEL", "info"),
+		LogLevel:    envStr("LOG_LEVEL", "info"),
+		LogRingSize: envInt("LOG_RING_SIZE", 8192),
 
 		HealthAddr:         envStr("HEALTH_LISTEN", ":8081"),
 		HealthProbeTimeout: envDuration("HEALTH_PROBE_TIMEOUT", time.Second),
