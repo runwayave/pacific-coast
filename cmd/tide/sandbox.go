@@ -1,8 +1,9 @@
 // cmd/tide sandbox — user-facing entry point to the schema-true
-// in-memory simulator. Two subcommands:
+// in-memory simulator. Three subcommands:
 //
 //	tide sandbox boot  <path>        # start HTTP server bound to the IR
 //	tide sandbox shell <path>        # interactive SQL REPL in-process
+//	tide sandbox spawn <path> -n N   # fork N children, time it, exit
 //
 // path is either a single .atl file or a directory containing .atl
 // files. The CLI compiles them via dsl.Parse + dsl.Lower, hands the
@@ -14,6 +15,12 @@
 // Shell uses the in-process Sandbox directly (no HTTP) so a single
 // missing key on the keyboard doesn't time out — the simulator's
 // <1ms response budget matters most here.
+//
+// Spawn is the fan-out drill: one parent + N forks in a single
+// process, with per-fork and total timings printed. Useful for the
+// "100 sandboxes alive in <50ms" demo, for benchmarking fork cost,
+// and for sanity-checking that pointer-sharing CoW behaves on a
+// production-sized schema.
 package main
 
 import (
@@ -39,8 +46,9 @@ import (
 func cmdSandbox(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "tide sandbox: missing subcommand")
-		fmt.Fprintln(os.Stderr, "  tide sandbox boot  <path>      start HTTP control plane")
-		fmt.Fprintln(os.Stderr, "  tide sandbox shell <path>      interactive SQL REPL")
+		fmt.Fprintln(os.Stderr, "  tide sandbox boot  <path>             start HTTP control plane")
+		fmt.Fprintln(os.Stderr, "  tide sandbox shell <path>             interactive SQL REPL")
+		fmt.Fprintln(os.Stderr, "  tide sandbox spawn <path> -n N        fork N children, time it, exit")
 		return 2
 	}
 	switch args[0] {
@@ -48,6 +56,8 @@ func cmdSandbox(args []string) int {
 		return cmdSandboxBoot(args[1:])
 	case "shell":
 		return cmdSandboxShell(args[1:])
+	case "spawn":
+		return cmdSandboxSpawn(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "tide sandbox: unknown subcommand %q\n", args[0])
 		return 2
@@ -213,6 +223,105 @@ func cmdSandboxShell(args []string) int {
 		runShellSQL(sb, line)
 	}
 	return 0
+}
+
+// cmdSandboxSpawn boots one parent sandbox from the given schema and
+// forks N children. Times the parent boot, the fork call, and the
+// per-child amortised cost. Exits when the report is printed — the
+// children fall out of scope and the GC reclaims them.
+//
+// Used in the Off Season demo to render the "100 sandboxes alive in
+// <50ms" frame. Also a poor-man's perf regression check: if forking
+// 100 sandboxes against a 50-entity schema starts taking seconds, the
+// CoW pointer-sharing path probably regressed and we want to know.
+//
+// Forking is sim-only because shared CoW makes no sense across two
+// independent Postgres processes; --backend=embedded is rejected.
+func cmdSandboxSpawn(args []string) int {
+	fs := flag.NewFlagSet("sandbox spawn", flag.ContinueOnError)
+	n := fs.Int("n", 100, "number of forks to create from the parent sandbox")
+	seed := fs.Int64("seed", 0, "seed for StrictDeterministic mode (0 = wall clock)")
+	strict := fs.Bool("strict", false, "enable StrictDeterministic on the parent")
+	backendFlag := fs.String("backend", "sim", "sim only — embedded does not support fork")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "tide sandbox spawn: missing schema path")
+		return 2
+	}
+	if *n < 0 {
+		fmt.Fprintln(os.Stderr, "tide sandbox spawn: -n must be >= 0")
+		return 2
+	}
+	if *backendFlag != "sim" {
+		fmt.Fprintf(os.Stderr, "tide sandbox spawn: --backend=%q not supported; forks share CoW state and only the sim backend implements that path\n", *backendFlag)
+		return 2
+	}
+
+	ir, err := loadSchemaIR(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tide sandbox spawn: %v\n", err)
+		return 1
+	}
+
+	parentStart := time.Now()
+	parent, err := sandbox.New(sandbox.Options{
+		IR:          ir,
+		Backend:     sandbox.BackendSim,
+		Seed:        *seed,
+		Determinism: determinismFromBool(*strict),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tide sandbox spawn: new parent: %v\n", err)
+		return 1
+	}
+	parentBoot := time.Since(parentStart)
+	defer func() { _ = parent.Close() }()
+
+	fmt.Printf("parent sandbox booted in %s (%d entities)\n", formatSpawnDuration(parentBoot), len(ir.Entities))
+
+	if *n == 0 {
+		fmt.Println("nothing to fork (n=0)")
+		return 0
+	}
+
+	fmt.Printf("forking %d children...\n", *n)
+	forkStart := time.Now()
+	kids, err := parent.Fork(*n)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tide sandbox spawn: fork: %v\n", err)
+		return 1
+	}
+	forkTotal := time.Since(forkStart)
+
+	avg := time.Duration(0)
+	if len(kids) > 0 {
+		avg = forkTotal / time.Duration(len(kids))
+	}
+	fmt.Printf("  %d sandboxes alive. total: %s (avg %s/sandbox)\n",
+		len(kids), formatSpawnDuration(forkTotal), formatSpawnDuration(avg))
+
+	// Don't close the children — letting them fall out of scope is the
+	// honest demo: their memory cost is what the GC reclaims, not what
+	// the user has to free by hand. (Process exit reaps everything.)
+	return 0
+}
+
+// formatSpawnDuration picks the most readable unit for a sub-second
+// duration. The runtime here spans nanoseconds (single-fork average on
+// a tiny schema) to tens of milliseconds (forking 100 against a big
+// schema), and we don't want every line to read either "0ms" or
+// "47831µs" — both are unhelpful.
+func formatSpawnDuration(d time.Duration) string {
+	switch {
+	case d >= time.Millisecond:
+		return fmt.Sprintf("%.2fms", float64(d)/float64(time.Millisecond))
+	case d >= time.Microsecond:
+		return fmt.Sprintf("%.1fµs", float64(d)/float64(time.Microsecond))
+	default:
+		return fmt.Sprintf("%dns", d.Nanoseconds())
+	}
 }
 
 func shellMeta(sb *sandbox.Sandbox, line string) error {
