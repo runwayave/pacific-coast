@@ -26,28 +26,28 @@ type planRequest struct {
 }
 
 type impactEntry struct {
-	Caller   string `json:"Caller"`
-	Affected bool   `json:"Affected"`
-	Detail   string `json:"Detail"`
+	Caller   string `json:"caller"`
+	Affected bool   `json:"affected"`
+	Detail   string `json:"detail"`
 }
 
 type planResponse struct {
-	PlanID         string        `json:"PlanID"`
-	Class          string        `json:"Class"`
-	UpSQL          string        `json:"UpSQL"`
-	DownSQL        string        `json:"DownSQL"`
-	ImpactReport   []impactEntry `json:"ImpactReport"`
-	ParseErrors    []string      `json:"ParseErrors"`
-	BreakingDetail []string      `json:"BreakingDetail"`
-	CheckpointHash string        `json:"CheckpointHash,omitempty"`
+	PlanID         string        `json:"plan_id"`
+	Class          string        `json:"class"`
+	UpSQL          string        `json:"up_sql"`
+	DownSQL        string        `json:"down_sql"`
+	ImpactReport   []impactEntry `json:"impact_report"`
+	ParseErrors    []string      `json:"parse_errors"`
+	BreakingDetail []string      `json:"breaking_detail"`
+	CheckpointHash string        `json:"checkpoint_hash,omitempty"`
 
-	PreBackfillUpSQL       string             `json:"PreBackfillUpSQL,omitempty"`
-	PreBackfillIndexesSQL  string             `json:"PreBackfillIndexesSQL,omitempty"`
-	PostBackfillUpSQL      string             `json:"PostBackfillUpSQL,omitempty"`
-	PostBackfillIndexesSQL string             `json:"PostBackfillIndexesSQL,omitempty"`
-	BackfillFields         []backfillFieldRef `json:"BackfillFields,omitempty"`
+	PreBackfillUpSQL       string             `json:"pre_backfill_up_sql,omitempty"`
+	PreBackfillIndexesSQL  string             `json:"pre_backfill_indexes_sql,omitempty"`
+	PostBackfillUpSQL      string             `json:"post_backfill_up_sql,omitempty"`
+	PostBackfillIndexesSQL string             `json:"post_backfill_indexes_sql,omitempty"`
+	BackfillFields         []backfillFieldRef `json:"backfill_fields,omitempty"`
 
-	Extensions []extensionStatus `json:"Extensions,omitempty"`
+	Extensions []extensionStatus `json:"extensions,omitempty"`
 }
 
 type extensionStatus struct {
@@ -93,8 +93,9 @@ type applyRequest struct {
 }
 
 type applyResponse struct {
-	AppliedAt   string `json:"AppliedAt"`
-	ContentHash string `json:"ContentHash,omitempty"`
+	AppliedAt   string `json:"applied_at"`
+	Version     int64  `json:"version,omitempty"`
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 // Exit codes:
