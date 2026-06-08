@@ -378,29 +378,56 @@ func normalizeTableRef(rv *pg.RangeVar) string {
 //   - `atlantis.consumer_account` — fully qualified
 //   - `consumer_account` — unqualified, schema defaults to search_path
 //   - other schemas — rejected (only atlantis is owned by the codegen)
+//
+// resolveTable looks up a SQL table reference (with or without schema
+// prefix) against the precomputed table set. Accepted forms:
+//
+//   - Fully qualified `schema.table` — looked up verbatim. Honors both
+//     the default `atlantis.<namespace>_<snake>` form (for entities
+//     with no `table "..."` override) and any override the entity set.
+//   - Bare `table` (no schema prefix) — looked up against the entry
+//     keyed by the bare table component. This keeps short references
+//     working when an entity is in `public` via `table "name"`.
 func resolveTable(tables map[string]string, ref string) (string, bool) {
 	ref = strings.ToLower(ref)
-	if i := strings.IndexByte(ref, '.'); i >= 0 {
-		schema, table := ref[:i], ref[i+1:]
-		if schema != "atlantis" {
-			return "", false
-		}
-		id, ok := tables[table]
-		return id, ok
-	}
 	id, ok := tables[ref]
 	return id, ok
 }
 
 // buildTableSet computes the SQL-table-name -> entity-id lookup once
-// per validation pass. Lower-cases the key so PG's case-insensitive
+// per validation pass. Lower-cases the keys so PG's case-insensitive
 // identifier matching works transparently.
+//
+// Each entity is registered under every form a user can legitimately
+// type in their custom-query SQL:
+//
+//   - `schema.table` (fully qualified) — always populated, using the
+//     entity's actual on-disk location: either the `table "..."`
+//     override or the default `atlantis.<namespace>_<snake>`.
+//   - `table` (bare) — populated when there's no override (matches the
+//     bare snake-case form) AND when there IS an override (matches the
+//     table portion of the override). Lets short references work in
+//     either world.
 func buildTableSet(ir *dsl.IR) map[string]string {
-	out := make(map[string]string, len(ir.Entities))
+	out := make(map[string]string, len(ir.Entities)*2)
 	for i := range ir.Entities {
 		e := &ir.Entities[i]
-		name := strings.ToLower(e.Namespace + "_" + snakeCase(e.Name))
-		out[name] = e.ID()
+		entityID := e.ID()
+		var qualified, bare string
+		if e.TableName != "" {
+			if dot := strings.IndexByte(e.TableName, '.'); dot >= 0 {
+				qualified = strings.ToLower(e.TableName)
+				bare = strings.ToLower(e.TableName[dot+1:])
+			} else {
+				qualified = strings.ToLower("public." + e.TableName)
+				bare = strings.ToLower(e.TableName)
+			}
+		} else {
+			bare = strings.ToLower(e.Namespace + "_" + snakeCase(e.Name))
+			qualified = "atlantis." + bare
+		}
+		out[qualified] = entityID
+		out[bare] = entityID
 	}
 	return out
 }
