@@ -1,11 +1,24 @@
 # Dockerfile.console — multi-stage build for the atlantis management console.
 #
+# Stage 0: generate Go pb stubs (buf generate)
 # Stage 1: build the React/TypeScript SPA (web/console → dist/)
 # Stage 2: build the Go BFF binary (cmd/console), embedding dist/
 # Stage 3: minimal runtime image
 #
 # Usage:
 #   docker build -f Dockerfile.console -t atlantis-console:local .
+
+# ── Stage 0: proto generation ─────────────────────────────────────────────────
+# clients/go/pb is gitignored — caller SDKs regenerate against the version of
+# atlantis they target — so a fresh clone has none of the *.pb.go files that
+# internal/runtime/pagination.go (reachable from internal/console/sandbox.go)
+# imports. Running buf generate inside the build lets a clean clone produce a
+# working image with no host-side codegen step.
+FROM --platform=$BUILDPLATFORM bufbuild/buf:1.41.0 AS proto
+WORKDIR /src
+COPY buf.yaml buf.gen.yaml ./
+COPY atlantis ./atlantis
+RUN buf generate
 
 # ── Stage 1: SPA build ────────────────────────────────────────────────────────
 FROM --platform=$BUILDPLATFORM node:22-alpine AS spa-build
@@ -38,6 +51,10 @@ COPY . .
 # Vite outDir is ../../cmd/console/dist (relative to web/console/),
 # which resolves to /app/cmd/console/dist inside the spa-build stage.
 COPY --from=spa-build /app/cmd/console/dist ./cmd/console/dist/
+# Pull in the freshly-generated pb stubs from the proto stage. Has to land
+# AFTER `COPY . .` so a stale local clients/go/pb/ in the build context
+# doesn't shadow the fresh generate.
+COPY --from=proto /src/clients/go/pb ./clients/go/pb
 
 # Static-linked binary so the runtime image can stay on a minimal base.
 # The pg_query_go vendored libpg_query archive is statically pulled in;

@@ -1,5 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
+# ---------- proto generation ----------
+# clients/go/pb is gitignored — caller SDKs regenerate against the version of
+# atlantis they target — so a fresh clone has none of the *.pb.go files that
+# internal/runtime/pagination.go imports. A dedicated proto stage runs
+# `buf generate` inside the image build, so a clean clone can `docker build`
+# without any host-side codegen step. Cached separately from the Go build —
+# proto sources change rarely.
+FROM --platform=$BUILDPLATFORM bufbuild/buf:1.41.0 AS proto
+WORKDIR /src
+COPY buf.yaml buf.gen.yaml ./
+COPY atlantis ./atlantis
+RUN buf generate
+
 # ---------- build ----------
 # Use BUILDPLATFORM so the compiler runs natively on the host (ARM64 on Apple
 # Silicon, amd64 on CI). pg_query_go's vendored C parser compiles fine on both
@@ -19,6 +32,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 COPY . .
+# Pull in the freshly-generated pb stubs from the proto stage. Has to land
+# AFTER `COPY . .` so a stale local clients/go/pb/ in the build context
+# doesn't shadow the fresh generate.
+COPY --from=proto /src/clients/go/pb ./clients/go/pb
 
 # VERSION is stamped into the binary (-X main.version) and surfaced in the
 # startup log. Pass --build-arg VERSION=<tag-or-sha>; defaults to "dev".
