@@ -543,7 +543,12 @@ func (dispatchedJSONCodec) Unmarshal(data mem.BufferSlice, v any) error {
 	return nil
 }
 
-func (dispatchedJSONCodec) Name() string { return "json" }
+// Name MUST match the server-side dispatchCodecName in
+// internal/server/jobsdispatcher/grpc.go. gRPC selects the server's
+// codec by this name via the content-type header; collision with the
+// admin service's "json" codec previously caused the dispatcher to
+// fail unmarshal at SessionAccepted.
+func (dispatchedJSONCodec) Name() string { return "atl-json-dispatch" }
 
 // MaxJobNamesPerOpen mirrors the server-side cap so the SDK doesn't
 // send a too-large envelope and get summarily rejected. Sync these

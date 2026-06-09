@@ -20,8 +20,46 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/encoding"
+	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/status"
 )
+
+// dispatchCodecName is the gRPC codec name negotiated by the
+// WorkerDispatch stream. Distinct from the admin service's "json"
+// codec so the two codecs can target different envelope types
+// without colliding in the global encoding registry.
+const dispatchCodecName = "atl-json-dispatch"
+
+// dispatchJSONCodec marshals jobsdispatcher.jsonMsg envelopes. The
+// admin package's "json" codec only knows *admin.jsonMsg; mounting
+// the dispatcher stream against the admin codec produced the
+// "cannot unmarshal into *jobsdispatcher.jsonMsg" error that
+// surfaced as soon as a worker actually connected. Registering this
+// codec at init under a distinct name lets gRPC's content-type
+// negotiation route dispatched-worker traffic to it specifically.
+type dispatchJSONCodec struct{}
+
+func (dispatchJSONCodec) Marshal(v any) (mem.BufferSlice, error) {
+	m, ok := v.(*jsonMsg)
+	if !ok {
+		return nil, fmt.Errorf("dispatchJSONCodec: cannot marshal %T", v)
+	}
+	return mem.BufferSlice{mem.SliceBuffer(m.Raw)}, nil
+}
+
+func (dispatchJSONCodec) Unmarshal(data mem.BufferSlice, v any) error {
+	m, ok := v.(*jsonMsg)
+	if !ok {
+		return fmt.Errorf("dispatchJSONCodec: cannot unmarshal into %T", v)
+	}
+	m.Raw = append(m.Raw[:0], data.Materialize()...)
+	return nil
+}
+
+func (dispatchJSONCodec) Name() string { return dispatchCodecName }
+
+func init() { encoding.RegisterCodecV2(dispatchJSONCodec{}) }
 
 // WorkerDispatchServer is the typed interface gRPC.RegisterService
 // uses for runtime conformance checking. Mirrors the AdminServer
