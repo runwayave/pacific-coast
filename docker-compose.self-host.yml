@@ -137,6 +137,14 @@ services:
       RATE_LIMIT_PER_CALLER: "${RATE_LIMIT_PER_CALLER:-atlantis-console=${CONSOLE_RATE_LIMIT_QPS:-5000}}"
       # Observability. Empty disables OTel export.
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      # Worker-poll dispatcher. When enabled, atlantis-server runs the
+      # drain loop against its local PG and pushes jobs over the
+      # WorkerDispatch bidi gRPC stream to remote workers. Workers
+      # connect outbound, so callers without direct PG access (laptop
+      # dev, cross-network, customer VPC) can still drain.
+      # Off by default; flip ATL_JOBS_DISPATCHER_ENABLED=true in .env.
+      ATL_JOBS_DISPATCHER_ENABLED: "${ATL_JOBS_DISPATCHER_ENABLED:-false}"
+      ATL_JOBS_DISPATCHER_QUEUES: "${ATL_JOBS_DISPATCHER_QUEUES:-default}"
     volumes:
       - atl-certs:/certs:ro
     healthcheck:
