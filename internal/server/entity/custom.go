@@ -22,8 +22,9 @@ import (
 // customQueryMeta holds the pre-computed metadata for one custom query.
 type customQueryMeta struct {
 	query      *dsl.CustomQuery
-	sql        string
-	inputCols  []dsl.QueryParam
+	sql        string           // normalized: `$name` rewritten to `$N` via sqlparams
+	inputCols  []dsl.QueryParam // declared inputs (for proto descriptors + type lookup)
+	argOrder   []string         // input names in placeholder order; drives arg binding
 	outputCols []dsl.QueryParam // populated when Output.Columns is set
 	asEntity   bool             // true when Output.AsEntityID is set
 
@@ -199,14 +200,26 @@ func (s *Server) executeCustomQueryWithReq(ctx context.Context, cqm *customQuery
 	ctx, cancel := runtime.Deadline(ctx, cqm.timeoutMS)
 	defer cancel()
 
-	// Bind input args.
-	args := make([]any, 0, len(cqm.inputCols))
-	for i, input := range cqm.inputCols {
-		fd := cqm.requestDesc.Fields().ByNumber(protoreflect.FieldNumber(i + 1))
+	// Bind input args in placeholder order. `cqm.sql` has been rewritten
+	// from `$name` to `$1, $2, ...` at snapshot-build time; `cqm.argOrder`
+	// lists the input names in the order they first appear in the rewritten
+	// SQL. We iterate it to bind values in the order PG expects. Inputs
+	// declared but never referenced in the SQL are intentionally omitted —
+	// no placeholder, no arg.
+	args := make([]any, 0, len(cqm.argOrder))
+	for _, name := range cqm.argOrder {
+		fd := cqm.requestDesc.Fields().ByName(protoreflect.Name(name))
 		if fd == nil {
-			continue
+			return nil, fmt.Errorf("custom query %s: input %q not found in request descriptor", cqm.query.Name, name)
 		}
-		args = append(args, customBindValue(req, fd, input.Type))
+		var inputType dsl.FieldType
+		for _, in := range cqm.inputCols {
+			if in.Name == name {
+				inputType = in.Type
+				break
+			}
+		}
+		args = append(args, customBindValue(req, fd, inputType))
 	}
 
 	rows, err := s.pool.Query(ctx, cqm.sql, args...)

@@ -33,6 +33,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/codegen/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/sqlparams"
 )
 
 // EmitCustomProto renders one `custom.proto` per namespace that
@@ -806,122 +807,19 @@ func emitCustomClientForNamespace(ns string, g *customGroup, cfg GenConfig) (GoF
 
 // ---- helpers ----
 
-// normalizeSQLParams rewrites a query's raw SQL body, replacing every
-// `$name` with `$N` where N is the 1-based ordinal of `name` in
-// inputs. Returns the rewritten SQL plus the input names in
-// placeholder order so the caller can emit `req.GetX()` calls in the
-// right sequence.
-//
-// The same scan rules as sqlvalidate.normalizeNamedParams apply:
-// single-quoted strings, double-quoted identifiers, and dollar-quoted
-// blocks are passed through unchanged. PG positional `$<digit>`
-// placeholders are also passed through, so an engineer who mixes
-// named and positional shapes gets the named ones rewritten without
-// disturbing the positional ones — though mixing is discouraged.
+// normalizeSQLParams and normalizeSQLParamsRaw delegate to the shared
+// sqlparams package. Both codegen (client emission) and the runtime
+// custom-query dispatcher rely on this rewrite; keeping the
+// implementation in one place guarantees client and server agree on
+// arg order. Behavior contract preserved: rewrites `$name` to `$N`,
+// passes through string / identifier literals and existing positional
+// placeholders, errors on undeclared names.
 func normalizeSQLParams(sql string, inputs []dsl.QueryParam) (string, []string, error) {
-	ordinal := make(map[string]int, len(inputs))
-	for i, p := range inputs {
-		ordinal[p.Name] = i + 1
-	}
-	return normalizeSQLParamsCore(sql, ordinal, inputs)
+	return sqlparams.NormalizeNamed(sql, inputs)
 }
 
 func normalizeSQLParamsRaw(sql string, ordinal map[string]int) (string, []string, error) {
-	// Build a synthetic inputs slice from the ordinal map's keys; the
-	// scan needs the input list only for resolving unknown args.
-	return normalizeSQLParamsCore(sql, ordinal, nil)
-}
-
-func normalizeSQLParamsCore(sql string, ordinal map[string]int, inputs []dsl.QueryParam) (string, []string, error) {
-	var b strings.Builder
-	b.Grow(len(sql))
-	// `order` lists each unique referenced input name once, in first-
-	// reference order. `localPos` maps an input name to its 1-based
-	// position within `order`. The emitted SQL uses those local
-	// positions ($1..$M where M = len(order)) so the caller can bind
-	// args by iterating `order` — one arg per unique input, regardless
-	// of how many times the input appears in the SQL text.
-	var order []string
-	localPos := make(map[string]int)
-	for i := 0; i < len(sql); i++ {
-		c := sql[i]
-		switch c {
-		case '\'':
-			b.WriteByte(c)
-			i++
-			for i < len(sql) {
-				if sql[i] == '\'' {
-					b.WriteByte('\'')
-					if i+1 < len(sql) && sql[i+1] == '\'' {
-						b.WriteByte('\'')
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				b.WriteByte(sql[i])
-				i++
-			}
-			i--
-		case '"':
-			b.WriteByte(c)
-			i++
-			for i < len(sql) {
-				if sql[i] == '"' {
-					b.WriteByte('"')
-					if i+1 < len(sql) && sql[i+1] == '"' {
-						b.WriteByte('"')
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				b.WriteByte(sql[i])
-				i++
-			}
-			i--
-		case '$':
-			if i+1 < len(sql) && sql[i+1] >= '0' && sql[i+1] <= '9' {
-				// Pre-existing PG positional placeholder; pass through.
-				b.WriteByte('$')
-				continue
-			}
-			if i+1 < len(sql) && isLetterOrUnderscoreCG(sql[i+1]) {
-				j := i + 1
-				for j < len(sql) && isIdentRuneCG(sql[j]) {
-					j++
-				}
-				name := sql[i+1 : j]
-				if _, ok := ordinal[name]; !ok {
-					return "", nil, fmt.Errorf("$%s is not a declared input parameter", name)
-				}
-				pos, seen := localPos[name]
-				if !seen {
-					order = append(order, name)
-					pos = len(order)
-					localPos[name] = pos
-				}
-				fmt.Fprintf(&b, "$%d", pos)
-				i = j - 1
-				continue
-			}
-			b.WriteByte('$')
-		default:
-			b.WriteByte(c)
-		}
-	}
-	_ = inputs // accepted on the signature for symmetry with normalizeSQLParams; the body indexes via ordinal only
-	return b.String(), order, nil
-}
-
-func isLetterOrUnderscoreCG(c byte) bool {
-	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'
-}
-
-func isIdentRuneCG(c byte) bool {
-	return isLetterOrUnderscoreCG(c) || (c >= '0' && c <= '9')
+	return sqlparams.NormalizeNamedRaw(sql, ordinal)
 }
 
 // emitProcedureEnqueueStep renders the Go code for an

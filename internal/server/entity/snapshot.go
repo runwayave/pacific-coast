@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/sqlparams"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -52,10 +53,21 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 		parts := splitEntityID(cq.Owner)
 		ns := parts[0]
 
+		// Rewrite `$name` → `$N` and capture the per-name arg order so
+		// the dispatcher can bind values in the order PG expects.
+		// Without this, raw `$user_id` is sent to PG verbatim and PG
+		// errors with `syntax error at or near "$"`. Codegen does the
+		// same rewrite via the same package for the client side.
+		normSQL, argOrder, err := sqlparams.NormalizeNamed(cq.SQL, cq.Inputs)
+		if err != nil {
+			return nil, fmt.Errorf("custom query %s: %w", cq.Name, err)
+		}
+
 		cqm := &customQueryMeta{
 			query:     cq,
-			sql:       cq.SQL,
+			sql:       normSQL,
 			inputCols: cq.Inputs,
+			argOrder:  argOrder,
 			timeoutMS: 2000,
 		}
 
