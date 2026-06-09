@@ -408,7 +408,7 @@ func parseSrc(t *testing.T, caller, src string) []*dsl.File {
 // would silently break if a refactor regresses them.
 
 func TestValidateCustomSQL_EmptyIR(t *testing.T) {
-	if msgs := validateCustomSQL(&dsl.IR{}); len(msgs) != 0 {
+	if msgs := validateCustomSQL(&dsl.IR{}, "consumer"); len(msgs) != 0 {
 		t.Errorf("empty IR should produce no errors, got %v", msgs)
 	}
 }
@@ -428,7 +428,9 @@ query OutfitsForConsumer for Account {
   }
 }
 `
-	f, err := dsl.Parse("t.pc", []byte(src))
+	// Parse with caller-prefixed path so SourcePath matches the
+	// "<caller>:<file>" shape that parseSubmitted produces in real flow.
+	f, err := dsl.Parse("consumer:t.atl", []byte(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -436,7 +438,7 @@ query OutfitsForConsumer for Account {
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
-	if msgs := validateCustomSQL(ir); len(msgs) != 0 {
+	if msgs := validateCustomSQL(ir, "consumer"); len(msgs) != 0 {
 		t.Errorf("expected no errors, got: %v", msgs)
 	}
 }
@@ -459,7 +461,7 @@ query BadTable for Account {
   }
 }
 `
-	f, err := dsl.Parse("t.pc", []byte(src))
+	f, err := dsl.Parse("consumer:t.atl", []byte(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -467,12 +469,65 @@ query BadTable for Account {
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
-	msgs := validateCustomSQL(ir)
+	msgs := validateCustomSQL(ir, "consumer")
 	if len(msgs) == 0 {
 		t.Fatal("expected at least one error for unknown table")
 	}
 	joined := strings.Join(msgs, "\n")
 	if !strings.Contains(joined, "consumer_widget") {
 		t.Errorf("error should mention the bad table; got: %s", joined)
+	}
+}
+
+func TestValidateCustomSQL_IgnoresOtherCallers(t *testing.T) {
+	// Two callers in the merged IR. The "other" caller's query references
+	// a nonexistent table — validation should ignore it because it isn't
+	// the submitting caller's content. The submitting caller's clean query
+	// passes.
+	otherSrc := `
+entity Account in consumer {
+  id          bigint primary
+  consumer_id text not null
+}
+
+query StaleRef for Account {
+  input { id: bigint }
+  output as Account
+  sql touches(Account) {
+    SELECT id FROM consumer_widget WHERE id = $id
+  }
+}
+`
+	mineSrc := `
+entity Cart in shop {
+  id      bigint primary
+  user_id bigint not null
+}
+
+query Mine for Cart {
+  input { id: bigint }
+  output as Cart
+  sql touches(Cart) {
+    SELECT id, user_id FROM shop_cart WHERE id = $id
+  }
+}
+`
+	other, err := dsl.Parse("consumer:other.atl", []byte(otherSrc))
+	if err != nil {
+		t.Fatalf("parse other: %v", err)
+	}
+	mine, err := dsl.Parse("shop:mine.atl", []byte(mineSrc))
+	if err != nil {
+		t.Fatalf("parse mine: %v", err)
+	}
+	ir, err := dsl.Lower([]*dsl.File{other, mine})
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+	if msgs := validateCustomSQL(ir, "shop"); len(msgs) != 0 {
+		t.Errorf("submitting caller's content is clean; should be 0 errors, got: %v", msgs)
+	}
+	if msgs := validateCustomSQL(ir, "consumer"); len(msgs) == 0 {
+		t.Fatal("when consumer submits, its own stale ref should be caught")
 	}
 }

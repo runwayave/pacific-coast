@@ -426,7 +426,12 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 
 	// Validate every custom query/procedure with pg_query_go. Lowering catches
 	// dep-free rules; this catches syntax and unresolved table refs.
-	customSQLErrs := validateCustomSQL(newIR)
+	// Scoped to the submitting caller's content — stored content from other
+	// callers is loaded into newIR for cross-caller table lookup but isn't
+	// re-validated here. It was already validated when its owning caller
+	// submitted it; re-validating under whatever rules are in force now
+	// would block this caller's apply on drift in some unrelated caller.
+	customSQLErrs := validateCustomSQL(newIR, req.Caller)
 
 	// Emit SQL and build the impact report.
 	var scripts codegen.SQLScripts
@@ -495,16 +500,39 @@ func translateBackfillFields(in []codegen.BackfillField) []BackfillFieldRef {
 	return out
 }
 
-// validateCustomSQL runs pg_query_go validation over every custom query and procedure.
-// Shared by PlanSchema and ApplyMigration.
-func validateCustomSQL(ir *dsl.IR) []string {
+// validateCustomSQL runs pg_query_go validation over the submitting
+// caller's custom queries and procedures, using the full IR's entity
+// set so cross-caller table references still resolve.
+//
+// Scope is intentional: stored content from other callers was already
+// validated when its owning caller submitted it. If we re-validated it
+// here under whatever rules are in force at this moment, drift in some
+// unrelated caller's stored content would block this caller's apply —
+// for example, a caller that hasn't re-applied since a `table "..."`
+// override was added on one of its entities would have stale references
+// in its stored procedures, and every other caller would be unable to
+// plan until that caller cleaned up. Validating only the submitting
+// caller's content keeps each caller responsible for its own SQL while
+// still letting the planner see the full schema for type lookup.
+//
+// caller is the SubmittingCaller; SourcePath on every IR decl is
+// formatted as "<caller>:<file-path>" by parseSubmitted / loadOtherCallers,
+// so a strings.HasPrefix on "<caller>:" is the right ownership test.
+func validateCustomSQL(ir *dsl.IR, caller string) []string {
+	prefix := caller + ":"
 	var msgs []string
 	for i := range ir.Queries {
+		if !strings.HasPrefix(ir.Queries[i].SourcePath, prefix) {
+			continue
+		}
 		if err := sqlvalidate.ValidateCustomQuery(ir, &ir.Queries[i]); err != nil {
 			msgs = append(msgs, err.Error())
 		}
 	}
 	for i := range ir.Procedures {
+		if !strings.HasPrefix(ir.Procedures[i].SourcePath, prefix) {
+			continue
+		}
 		if err := sqlvalidate.ValidateCustomProcedure(ir, &ir.Procedures[i]); err != nil {
 			msgs = append(msgs, err.Error())
 		}
@@ -577,8 +605,9 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 		codegen.WithCallerContext(req.Caller, applyOwnership, applyCrossRefs))
 
 	// Re-validate inside the lock: another caller's apply between plan and apply
-	// can change which tables are visible.
-	if msgs := validateCustomSQL(newIR); len(msgs) > 0 {
+	// can change which tables are visible. Same caller-scoping rationale as
+	// the PlanSchema call site above.
+	if msgs := validateCustomSQL(newIR, req.Caller); len(msgs) > 0 {
 		return nil, fmt.Errorf("admin: custom SQL validation failed: %v", msgs)
 	}
 
