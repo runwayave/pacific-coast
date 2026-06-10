@@ -42,8 +42,8 @@ Thumbs.db
 .idea/
 *.swp
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code local state (settings, scheduled task locks, worktrees)
+.claude/
 
 # Air hot-reload (see .air.toml)
 .air/

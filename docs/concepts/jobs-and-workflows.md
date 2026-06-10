@@ -66,13 +66,16 @@ For non-Go handlers, `RegisterRemote(jobID, addr)` dispatches over gRPC to an ex
 |---|---|---|
 | `retries N` | 0 | Max retry count before DLQ. |
 | `timeout 30m` | 30m | Per-attempt deadline. `timeout none` disables the deadline entirely. |
+| `heartbeat 10m` | 5m | Per-attempt lease window. Widen for handlers that block on a single external call longer than the server's default; narrow to fail fast on quick jobs. |
 | `queue "name"` | `"default"` | Named queue for partitioning worker pools. |
 | `schedule "cron"` | (none) | Cron spec for periodic invocation. |
 | `visible_to "caller"` | (any) | RBAC: only the named caller can submit. `"*"` for any. |
 
 ## Checkpointing
 
-Long-running handlers call `jobs.Checkpoint(ctx, pct, msg)` to report progress. The progress is visible in `tide job status` and written to the `progress_pct` / `progress_msg` columns on the row. `Checkpoint` returns an error, but handlers typically discard it — the worker never fails a claim because of a checkpoint write failure, so treating checkpoint errors as advisory keeps the handler focused on its real work.
+Long-running handlers call `jobs.Checkpoint(ctx, pct, msg)` to report progress. Each call bumps the row's lease (same path as an auto-heartbeat) AND persists `progress_pct` / `progress_msg` so the operator sees live status in `tide job status` and the console session detail. `Checkpoint` returns an error, but handlers typically discard it — the worker never fails a claim because of a checkpoint write failure, so treating checkpoint errors as advisory keeps the handler focused on its real work.
+
+See [Long-running handlers](../guides/long-running-handlers.md) for the full handler contract — idempotency, the heartbeat / checkpoint distinction, resume-from-progress, and a worked Shopify-import example.
 
 ## Distributed tracing
 
