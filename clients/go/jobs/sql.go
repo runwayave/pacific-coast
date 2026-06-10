@@ -175,9 +175,14 @@ func ExtendLease(
 	if len(jobIDs) == 0 {
 		return nil
 	}
+	// Numeric multiplication (not string-concat) so PG infers $1 as
+	// bigint and pgx encodes the int64 milliseconds directly. The
+	// string-concat form (`$1 || ' milliseconds'`) made PG infer $1
+	// as text, which made pgx error with "cannot find encode plan"
+	// at production.
 	_, err := pool.Exec(ctx, `
 UPDATE atlantis.jobs
-   SET claimed_until = now() + ($1 || ' milliseconds')::interval
+   SET claimed_until = now() + ($1 * interval '1 millisecond')
  WHERE id = ANY($2::bigint[]) AND claimed_by = $3`,
 		leaseExtension.Milliseconds(), jobIDs, claimedBy)
 	return err
