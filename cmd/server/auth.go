@@ -15,6 +15,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+
+	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 )
 
 // transportCreds builds the gRPC credentials.TransportCredentials for the
@@ -70,13 +72,22 @@ func callerFromContext(ctx context.Context) string {
 // resolveCallerInterceptor populates the callerKey context value from the
 // peer's TLS cert (production) or x-caller header (dev). Subsequent
 // interceptors and handlers read it via callerFromContext.
-//
-// We expose this as a unary interceptor; the streaming version is identical
-// in shape but not needed because no RPC is streaming yet.
 func resolveCallerInterceptor() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		ctx = context.WithValue(ctx, callerKey{}, resolveCaller(ctx))
 		return handler(ctx, req)
+	}
+}
+
+// resolveCallerStreamInterceptor is the streaming sibling of
+// resolveCallerInterceptor. Wraps the ServerStream with a context
+// that carries the resolved caller key so cert binding + auth
+// interceptors (and the WorkerSession handler itself) can read it
+// via callerFromContext just like they would on a unary RPC.
+func resolveCallerStreamInterceptor() grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		ctx := context.WithValue(ss.Context(), callerKey{}, resolveCaller(ss.Context()))
+		return handler(srv, interceptors.WithStreamContext(ss, ctx))
 	}
 }
 
@@ -105,18 +116,29 @@ func resolveCaller(ctx context.Context) string {
 func loggingInterceptor(log *slog.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		resp, err := handler(ctx, req)
-		code := status.Code(err)
-		if code == codes.OK {
-			log.Debug("rpc", "method", info.FullMethod, "caller", callerFromContext(ctx))
-		} else {
-			log.Info("rpc",
-				"method", info.FullMethod,
-				"caller", callerFromContext(ctx),
-				"code", code.String(),
-				"err", err)
-		}
+		logRPC(log, info.FullMethod, callerFromContext(ctx), err)
 		return resp, err
 	}
+}
+
+// loggingStreamInterceptor is the streaming sibling of loggingInterceptor.
+// Logs at stream close with the same shape so an audit grep on
+// method/caller/code finds both unary and stream events.
+func loggingStreamInterceptor(log *slog.Logger) grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		err := handler(srv, ss)
+		logRPC(log, info.FullMethod, callerFromContext(ss.Context()), err)
+		return err
+	}
+}
+
+func logRPC(log *slog.Logger, method, caller string, err error) {
+	code := status.Code(err)
+	if code == codes.OK {
+		log.Debug("rpc", "method", method, "caller", caller)
+		return
+	}
+	log.Info("rpc", "method", method, "caller", caller, "code", code.String(), "err", err)
 }
 
 // recoveryInterceptor catches panics from downstream handlers and converts
@@ -134,5 +156,24 @@ func recoveryInterceptor(log *slog.Logger) grpc.UnaryServerInterceptor {
 			}
 		}()
 		return handler(ctx, req)
+	}
+}
+
+// recoveryStreamInterceptor is the streaming sibling of recoveryInterceptor.
+// Long-lived streams (WorkerSession) make panic recovery especially
+// important — without it, one malformed envelope in a handler could
+// kill the whole server.
+func recoveryStreamInterceptor(log *slog.Logger) grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("panic in stream handler",
+					"method", info.FullMethod,
+					"caller", callerFromContext(ss.Context()),
+					"panic", r)
+				err = status.Errorf(codes.Internal, "internal error")
+			}
+		}()
+		return handler(srv, ss)
 	}
 }

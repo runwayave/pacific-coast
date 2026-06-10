@@ -206,16 +206,17 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	})
 
 	log.Debug("init: grpc.NewServer")
-	authInt := interceptors.NewAuth(interceptors.AuthConfig{
+	// One AuthChecker → two interceptors (Unary + Stream) that share
+	// the same allowlist + exempt-prefix set. Admin RPCs are exempt so
+	// a new caller can register schema before they appear in the
+	// entity-RPC allowlist; health + reflection are infrastructure
+	// probes.
+	authChecker := interceptors.NewAuthChecker(interceptors.AuthConfig{
 		Allowlist:         authAllowlist,
 		Enforce:           cfg.TLSCertFile != "",
 		CallerFromContext: callerFromContext,
 		ExemptPrefixes: []string{
-			// Admin RPCs are the bootstrap path: a new caller registers
-			// their schema via PlanSchema + ApplyMigration before they
-			// can be in the allowlist for entity RPCs.
 			"/atlantis.admin.v1.Admin/",
-			// k8s health probes and reflection tooling.
 			"/grpc.health.v1.Health/",
 			"/grpc.reflection.",
 		},
@@ -250,7 +251,11 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// layer in front of the BFF — so we skip binding for it. Operators
 	// can add more CNs via ATL_CERT_BINDING_EXEMPT_CALLERS if they have
 	// a similar bootstrap CN that authenticates by other means.
-	certBinding := interceptors.NewCertBinding(interceptors.CertBindingConfig{
+	// One CertBindingChecker → both interceptor flavors share one
+	// TTL cache, so a stream lookup for "vendor" and a unary lookup
+	// for "vendor" hit the same cache entry instead of duplicating
+	// the DB round-trip across two parallel caches.
+	certBindingChecker := interceptors.NewCertBindingChecker(interceptors.CertBindingConfig{
 		Lookup:            adminSvc.LookupCallerCertBinding,
 		Enforce:           cfg.TLSCertFile != "",
 		CallerFromContext: callerFromContext,
@@ -258,16 +263,31 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		Log:               log,
 	})
 
+	// Stream chain mirrors the unary chain order for everything that
+	// applies on a per-stream basis. Rate limiting is intentionally
+	// excluded — it's an RPCs/sec concept and a long-lived stream
+	// (one per worker pod, hours long) doesn't fit. Cert binding +
+	// allowlist are reapplied at stream open via the same shared
+	// check helpers, so revoked certs and unregistered callers can't
+	// bypass via the streaming surface.
 	srv := grpc.NewServer(
 		grpc.Creds(creds),
 		grpc.ChainUnaryInterceptor(
 			recoveryInterceptor(log),
 			interceptors.NewMetrics(),
 			resolveCallerInterceptor(),
-			certBinding,
-			authInt,
+			certBindingChecker.Unary(),
+			authChecker.Unary(),
 			rateLimit,
 			loggingInterceptor(log),
+		),
+		grpc.ChainStreamInterceptor(
+			recoveryStreamInterceptor(log),
+			interceptors.NewMetricsStream(),
+			resolveCallerStreamInterceptor(),
+			certBindingChecker.Stream(),
+			authChecker.Stream(),
+			loggingStreamInterceptor(log),
 		),
 	)
 
