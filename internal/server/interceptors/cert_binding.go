@@ -56,17 +56,73 @@ type CertBindingConfig struct {
 	Log *slog.Logger
 }
 
-// NewCertBinding returns a unary interceptor that rejects any RPC
-// whose peer cert doesn't match the fingerprint recorded for the
-// resolved caller in caller_identities. This is the load-bearing
-// mechanism for revoking a cert after rotation or caller deletion
-// without standing up a CRL — the row's fingerprint is the single
-// source of truth for "which cert authenticates as this CN."
+// CertBindingChecker owns the cert-binding state shared across both
+// the unary and stream interceptors: the TTL cache of CN -> stored
+// fingerprint, the exempt-CN set, and the resolver callbacks. Mount
+// via .Unary() and .Stream() on their respective chains; both
+// methods consult the same cache so a stream RPC and a unary RPC for
+// the same CN share lookup state — a single DB hit per CN per TTL
+// window across the whole gRPC surface, not one per interceptor
+// flavor.
 //
-// Place after resolveCallerInterceptor and before the auth
-// allowlist interceptor in the chain. The fail-closed mode is
-// Unauthenticated (the cert is wrong, not the caller's permissions).
+// Lifecycle: construct once at server boot; safe to call .Unary()
+// and .Stream() multiple times (each returns a fresh closure, but
+// all closures from the same Checker share the underlying cache and
+// config).
+type CertBindingChecker struct {
+	check func(ctx context.Context, fullMethod string) error
+}
+
+// NewCertBindingChecker constructs the shared checker. The supplied
+// CertBindingConfig is captured by value; subsequent mutations on
+// the original config don't affect the checker (defense against the
+// "caller secretly expanded the exempt list" footgun).
+func NewCertBindingChecker(cfg CertBindingConfig) *CertBindingChecker {
+	return &CertBindingChecker{check: buildCertBindingCheck(cfg)}
+}
+
+// Unary returns the unary interceptor flavor.
+func (c *CertBindingChecker) Unary() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if err := c.check(ctx, info.FullMethod); err != nil {
+			return nil, err
+		}
+		return handler(ctx, req)
+	}
+}
+
+// Stream returns the streaming interceptor flavor. Applied at stream
+// open; the peer cert is fixed at TLS handshake time, so re-checking
+// on every envelope would be wasted work.
+func (c *CertBindingChecker) Stream() grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if err := c.check(ss.Context(), info.FullMethod); err != nil {
+			return err
+		}
+		return handler(srv, ss)
+	}
+}
+
+// NewCertBinding is a thin backwards-compat wrapper. New code should
+// prefer NewCertBindingChecker so unary + stream callers share one
+// cache. Calling NewCertBinding + NewCertBindingStream with the same
+// config creates two independent caches; calling NewCertBindingChecker
+// once and using .Unary() + .Stream() shares them.
 func NewCertBinding(cfg CertBindingConfig) grpc.UnaryServerInterceptor {
+	return NewCertBindingChecker(cfg).Unary()
+}
+
+// NewCertBindingStream is the backwards-compat sibling of NewCertBinding.
+// See the note on NewCertBinding about cache sharing.
+func NewCertBindingStream(cfg CertBindingConfig) grpc.StreamServerInterceptor {
+	return NewCertBindingChecker(cfg).Stream()
+}
+
+// buildCertBindingCheck extracts the fingerprint comparison so both
+// flavors share one implementation. Returns a closure that captures
+// the cache + lookup so a single TTL bucket serves the whole gRPC
+// surface.
+func buildCertBindingCheck(cfg CertBindingConfig) func(ctx context.Context, fullMethod string) error {
 	enforce := cfg.Enforce
 	callerFn := cfg.CallerFromContext
 	if callerFn == nil {
@@ -87,19 +143,19 @@ func NewCertBinding(cfg CertBindingConfig) grpc.UnaryServerInterceptor {
 
 	cache := &bindingCache{ttl: ttl}
 
-	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	return func(ctx context.Context, fullMethod string) error {
 		if !enforce {
-			return handler(ctx, req)
+			return nil
 		}
 		caller := callerFn(ctx)
 		// Anonymous reaches us in insecure dev mode (no mTLS configured
 		// for the listener). The auth interceptor will reject it; this
 		// interceptor has nothing meaningful to check.
 		if caller == "" || caller == "anonymous" {
-			return handler(ctx, req)
+			return nil
 		}
 		if _, ok := exempt[caller]; ok {
-			return handler(ctx, req)
+			return nil
 		}
 
 		// Pull the presented leaf cert. With Enforce=true the listener
@@ -107,40 +163,40 @@ func NewCertBinding(cfg CertBindingConfig) grpc.UnaryServerInterceptor {
 		// here means the listener is mis-configured — fail closed.
 		peerCert, ok := leafCertFromContext(ctx)
 		if !ok {
-			log.Warn("cert binding: no peer cert on enforced path", "caller", caller, "method", info.FullMethod)
-			return nil, status.Error(codes.Unauthenticated, "no peer certificate")
+			log.Warn("cert binding: no peer cert on enforced path", "caller", caller, "method", fullMethod)
+			return status.Error(codes.Unauthenticated, "no peer certificate")
 		}
 		presented := sha256.Sum256(peerCert.Raw)
 
 		exists, stored, err := cache.lookup(ctx, caller, cfg.Lookup)
 		if err != nil {
-			log.Error("cert binding: lookup", "caller", caller, "method", info.FullMethod, "err", err)
-			return nil, status.Error(codes.Unauthenticated, "caller binding unavailable")
+			log.Error("cert binding: lookup", "caller", caller, "method", fullMethod, "err", err)
+			return status.Error(codes.Unauthenticated, "caller binding unavailable")
 		}
 		if !exists {
 			// Caller has no row — either never registered, or revoked.
 			// Either way it can't authenticate. Distinguishing the two
 			// would leak existence; one error code covers both.
-			log.Info("cert binding: unknown caller", "caller", caller, "method", info.FullMethod)
-			return nil, status.Errorf(codes.Unauthenticated, "caller %q is not registered", caller)
+			log.Info("cert binding: unknown caller", "caller", caller, "method", fullMethod)
+			return status.Errorf(codes.Unauthenticated, "caller %q is not registered", caller)
 		}
 		if stored == nil {
 			// Bootstrap window: row exists but no fingerprint recorded
 			// yet (operator registered the caller, hasn't issued a cert
 			// through the console). Accept any CA-signed cert until
 			// the first console issuance binds the fingerprint.
-			return handler(ctx, req)
+			return nil
 		}
 		// subtle.ConstantTimeCompare so a timing oracle can't probe
 		// fingerprint bytes one column at a time.
 		if subtle.ConstantTimeCompare(stored, presented[:]) != 1 {
 			log.Info("cert binding: fingerprint mismatch (cert superseded)",
 				"caller", caller,
-				"method", info.FullMethod,
+				"method", fullMethod,
 			)
-			return nil, status.Errorf(codes.Unauthenticated, "cert superseded for caller %q", caller)
+			return status.Errorf(codes.Unauthenticated, "cert superseded for caller %q", caller)
 		}
-		return handler(ctx, req)
+		return nil
 	}
 }
 
