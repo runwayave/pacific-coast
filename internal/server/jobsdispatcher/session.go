@@ -78,6 +78,35 @@ type session struct {
 	// long-lived session can't accumulate unbounded history.
 	eventsMu sync.Mutex
 	events   []sessionEvent
+
+	// leasePendingCh feeds the batched lease processor goroutine.
+	// Heartbeat / Checkpoint receive paths push job IDs onto it;
+	// the processor (runLeaseProcessor) coalesces them into a single
+	// ExtendLease per leaseFlushInterval. Bounded capacity so a
+	// processor stall can't grow memory without limit. See
+	// leaseproc.go for the contract.
+	leasePendingCh chan int64
+
+	// perJobHeartbeat captures per-job lease budgets from the IR's
+	// optional `heartbeat <duration>` modifier on each job decl.
+	// Populated at Open from the IRLoader snapshot; empty means
+	// every job uses the server's global HeartbeatBudget. The map
+	// is immutable after Open so a concurrent re-apply doesn't
+	// reshape per-row leases mid-session — operators get the
+	// override at next-session-start.
+	perJobHeartbeat map[string]time.Duration
+}
+
+// leaseDurFor returns the lease window that applies to a single job
+// dispatched on this session: the per-job override if one was declared
+// in the IR, otherwise the dispatcher's global default. The override
+// is symmetric — both `heartbeat 30s` (shorter) and `heartbeat 10m`
+// (longer) take effect.
+func (s *session) leaseDurFor(jobName string, fallback time.Duration) time.Duration {
+	if d, ok := s.perJobHeartbeat[jobName]; ok && d > 0 {
+		return d
+	}
+	return fallback
 }
 
 type inflightRow struct {
@@ -99,7 +128,7 @@ type sessionEvent struct {
 
 const sessionEventCap = 50
 
-func newSession(open *OpenSession, caller string, aliases []string) *session {
+func newSession(open *OpenSession, caller string, aliases []string, perJobHeartbeat map[string]time.Duration) *session {
 	jobNames := make(map[string]struct{}, len(open.JobNames))
 	for _, n := range open.JobNames {
 		jobNames[n] = struct{}{}
@@ -118,19 +147,32 @@ func newSession(open *OpenSession, caller string, aliases []string) *session {
 	if len(aliases) > 0 {
 		aliasCopy = append([]string(nil), aliases...)
 	}
+	// Defensive copy of the per-job heartbeat overrides for the same
+	// reason — operator-facing config could mutate after Open and we
+	// want this session to bind to the snapshot it was authorized
+	// against.
+	var hbCopy map[string]time.Duration
+	if len(perJobHeartbeat) > 0 {
+		hbCopy = make(map[string]time.Duration, len(perJobHeartbeat))
+		for k, v := range perJobHeartbeat {
+			hbCopy[k] = v
+		}
+	}
 	s := &session{
-		id:          uuid.NewString(),
-		caller:      caller,
-		aliases:     aliasCopy,
-		queue:       open.Queue,
-		podID:       open.PodID,
-		version:     open.Version,
-		jobNames:    jobNames,
-		maxInFlight: maxIF,
-		outbox:      make(chan *DispatchEnvelope, maxIF+4),
-		inflight:    make(map[int64]inflightRow, maxIF),
-		connectedAt: time.Now(),
-		closeCh:     make(chan struct{}),
+		id:              uuid.NewString(),
+		caller:          caller,
+		aliases:         aliasCopy,
+		queue:           open.Queue,
+		podID:           open.PodID,
+		version:         open.Version,
+		jobNames:        jobNames,
+		maxInFlight:     maxIF,
+		outbox:          make(chan *DispatchEnvelope, maxIF+4),
+		inflight:        make(map[int64]inflightRow, maxIF),
+		connectedAt:     time.Now(),
+		closeCh:         make(chan struct{}),
+		leasePendingCh:  make(chan int64, leaseEnqueueCap),
+		perJobHeartbeat: hbCopy,
 	}
 	s.lastHeartbeatNS.Store(time.Now().UnixNano())
 	return s

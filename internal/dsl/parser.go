@@ -1251,6 +1251,20 @@ func (p *Parser) parseJob() *JobDecl {
 			default:
 				p.errf(next.Pos, "expected duration or 'none' after 'timeout', got %s", next.Kind)
 			}
+		case TokHeartbeat:
+			p.advance()
+			// `heartbeat 10m` — per-attempt lease budget for the
+			// dispatched-worker dispatcher. Distinct from timeout
+			// (which bounds how long a single handler invocation
+			// runs); heartbeat bounds how often the worker must
+			// signal liveness. Zero/unset = use server default.
+			next := p.peek()
+			if next.Kind != TokDuration {
+				p.errf(next.Pos, "expected duration after 'heartbeat', got %s", next.Kind)
+			} else {
+				p.advance()
+				job.Heartbeat = &JobHeartbeat{Pos: t.Pos, Duration: next.Value}
+			}
 		case TokQueue:
 			p.advance()
 			s := p.expect(TokString)
@@ -1264,8 +1278,8 @@ func (p *Parser) parseJob() *JobDecl {
 			s := p.expect(TokString)
 			job.VisibleTo = &JobVisibleTo{Pos: t.Pos, Caller: s.Value}
 		default:
-			p.errf(t.Pos, "expected 'args', 'retries', 'timeout', 'queue', 'schedule', 'visible_to', or '}', got %s", t.Kind)
-			p.recover(TokRBrace, TokArgs, TokRetries, TokTimeout, TokQueue, TokSchedule, TokVisibleTo, TokEOF)
+			p.errf(t.Pos, "expected 'args', 'retries', 'timeout', 'heartbeat', 'queue', 'schedule', 'visible_to', or '}', got %s", t.Kind)
+			p.recover(TokRBrace, TokArgs, TokRetries, TokTimeout, TokHeartbeat, TokQueue, TokSchedule, TokVisibleTo, TokEOF)
 		}
 	}
 }

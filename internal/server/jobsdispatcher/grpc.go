@@ -182,10 +182,42 @@ func (d *Dispatcher) WorkerSession(stream grpc.ServerStream) error {
 		return err
 	}
 
-	// 4. Register the session.
-	s := newSession(open, caller, aliases)
+	// 4. Build the per-job heartbeat override map from the IR. Only
+	// populated for jobs the worker declared they handle — saves a
+	// lookup per dispatch and bounds the per-session memory footprint.
+	var perJobHeartbeat map[string]time.Duration
+	for i := range ir.Jobs {
+		j := &ir.Jobs[i]
+		if j.HeartbeatMS <= 0 {
+			continue
+		}
+		id := j.ID()
+		// Only retain overrides for jobs this session handles —
+		// other entries can never apply per the visible_to gate.
+		isHandled := false
+		for _, declared := range open.JobNames {
+			if declared == id {
+				isHandled = true
+				break
+			}
+		}
+		if !isHandled {
+			continue
+		}
+		if perJobHeartbeat == nil {
+			perJobHeartbeat = make(map[string]time.Duration, 2)
+		}
+		perJobHeartbeat[id] = time.Duration(j.HeartbeatMS) * time.Millisecond
+	}
+
+	// 5. Register the session + start the batched lease processor.
+	s := newSession(open, caller, aliases, perJobHeartbeat)
 	d.register(s)
 	defer d.unregister(stream.Context(), s, "stream_closed")
+
+	// Lease processor runs for the lifetime of the stream. Cancels
+	// on stream context cancel; final flush handled inside.
+	go d.runLeaseProcessor(stream.Context(), s)
 
 	// 4. Send SessionAccepted.
 	leaseTTL := int(d.cfg.HeartbeatBudget.Milliseconds())
@@ -227,6 +259,8 @@ func (d *Dispatcher) WorkerSession(stream grpc.ServerStream) error {
 		switch {
 		case env.Heartbeat != nil:
 			d.handleHeartbeat(stream.Context(), s, env.Heartbeat)
+		case env.Checkpoint != nil:
+			d.handleCheckpoint(stream.Context(), s, env.Checkpoint)
 		case env.Ack != nil:
 			d.handleAck(s, env.Ack)
 		case env.Complete != nil:

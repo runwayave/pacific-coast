@@ -28,11 +28,12 @@ package jobsdispatcher
 // multiple variants set are treated as malformed (see the protocol-
 // violation handling in session.go).
 type WorkerEnvelope struct {
-	Open      *OpenSession `json:"open,omitempty"`
-	Heartbeat *Heartbeat   `json:"heartbeat,omitempty"`
-	Ack       *Ack         `json:"ack,omitempty"`
-	Complete  *Complete    `json:"complete,omitempty"`
-	Fail      *Fail        `json:"fail,omitempty"`
+	Open       *OpenSession `json:"open,omitempty"`
+	Heartbeat  *Heartbeat   `json:"heartbeat,omitempty"`
+	Checkpoint *Checkpoint  `json:"checkpoint,omitempty"`
+	Ack        *Ack         `json:"ack,omitempty"`
+	Complete   *Complete    `json:"complete,omitempty"`
+	Fail       *Fail        `json:"fail,omitempty"`
 }
 
 // DispatchEnvelope is the server → client message shape. Same tagged-
@@ -69,6 +70,30 @@ type OpenSession struct {
 // or buggy worker sending billions of ids.
 type Heartbeat struct {
 	JobIDs []int64 `json:"job_ids"`
+}
+
+// Checkpoint reports handler progress for one in-flight job. Distinct
+// from Heartbeat so the persistence isn't gated on the auto-tick: when
+// a handler finishes a stage and immediately wants the operator to
+// see `progress_pct = 100`, the Checkpoint envelope flushes through
+// the priority send channel without waiting for the next ~10s beat.
+//
+// Semantics on receipt:
+//   - Lease is extended (same code path as Heartbeat — both feed the
+//     batched lease processor).
+//   - atlantis.jobs.progress_pct / progress_msg / progress_at are
+//     updated for this row. Pct is clamped to [0, 100]; Msg is
+//     truncated to MaxCheckpointMsgChars characters.
+//   - A session ring-buffer event is appended so operators can see
+//     the progress trail in the console session-detail view.
+//
+// Unlike Heartbeat, a Checkpoint for a single job_id is intentional:
+// progress is per-row state. The SDK sends one Checkpoint per
+// jobs.Checkpoint(ctx, pct, msg) call — handlers decide cadence.
+type Checkpoint struct {
+	JobID int64  `json:"job_id"`
+	Pct   int    `json:"pct,omitempty"`
+	Msg   string `json:"msg,omitempty"`
 }
 
 // Ack signals that the worker has started running the dispatched job.
@@ -141,13 +166,15 @@ type Goodbye struct {
 	Reason string `json:"reason"`
 }
 
-// Defensive limits applied at Open / Heartbeat receive. A malicious or
-// buggy worker can't blow up server memory by sending a million job
-// names — these caps reject obviously-wrong envelopes before they
-// consume any per-id machinery.
+// Defensive limits applied at Open / Heartbeat / Checkpoint receive.
+// A malicious or buggy worker can't blow up server memory by sending
+// a million job names or a multi-megabyte progress message — these
+// caps reject obviously-wrong envelopes before they consume any
+// per-id machinery.
 const (
 	MaxJobNamesPerOpen      = 1024
 	MaxHeartbeatIDsPerFrame = 4096
+	MaxCheckpointMsgChars   = 256
 	MinMaxInFlight          = 1
 	MaxMaxInFlight          = 256
 )

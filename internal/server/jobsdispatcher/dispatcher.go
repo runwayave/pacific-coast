@@ -33,6 +33,7 @@ package jobsdispatcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -66,7 +67,9 @@ type Config struct {
 
 	// AckTimeoutMS is the ms a worker has between Dispatch send and
 	// Ack receive. Missing it triggers ack-timeout revoke. Defaults
-	// to HeartbeatBudget/2.
+	// to HeartbeatBudget/2. (The SDK's auto-heartbeat tick is a
+	// separate value — HeartbeatBudget/3 — negotiated at session
+	// open via the SessionAccepted envelope.)
 	AckTimeoutMS int
 
 	// ShutdownBudget is how long graceful shutdown waits for in-flight
@@ -111,10 +114,15 @@ func DefaultConfig() Config {
 		host = "atlantis"
 	}
 	return Config{
-		HeartbeatBudget: 30 * time.Second,
+		// 5-minute default aligns with Temporal's activity heartbeat
+		// timeout. Long-running handlers (Shopify import, ML training)
+		// fit comfortably; quick handlers see no downside other than a
+		// longer crash-recovery window. Per-job overrides via the DSL
+		// `heartbeat <duration>` modifier.
+		HeartbeatBudget: 5 * time.Minute,
 		DrainInterval:   time.Second,
 		BatchSize:       50,
-		AckTimeoutMS:    15000, // matches HeartbeatBudget/2 default
+		AckTimeoutMS:    150000, // matches HeartbeatBudget/2
 		ShutdownBudget:  30 * time.Second,
 		PodID:           host,
 		Logger:          slog.Default(),
@@ -164,7 +172,7 @@ type Dispatcher struct {
 // loops via RunQueue.
 func New(pool *pgxpool.Pool, cfg Config) *Dispatcher {
 	if cfg.HeartbeatBudget <= 0 {
-		cfg.HeartbeatBudget = 30 * time.Second
+		cfg.HeartbeatBudget = 5 * time.Minute
 	}
 	if cfg.DrainInterval <= 0 {
 		cfg.DrainInterval = time.Second
@@ -353,10 +361,28 @@ func (d *Dispatcher) drainOnce(ctx context.Context, queue string) {
 			continue
 		}
 
+		// Per-job heartbeat override (from `.atl` `heartbeat <dur>`)
+		// resets this single row's lease. Symmetric: a longer override
+		// extends past the queue-wide default; a shorter override
+		// narrows the recovery window so a dead worker is reclaimed
+		// sooner. Apply via ExtendLease so the underlying claimed_until
+		// matches what we tell the SDK and what the ack-timeout sweeper
+		// expects.
+		rowLeaseUntil := leaseUntil
+		if perJob, ok := s.perJobHeartbeat[row.JobName]; ok && perJob > 0 && perJob != d.cfg.HeartbeatBudget {
+			rowLeaseUntil = time.Now().Add(perJob)
+			if err := jobs.ExtendLease(ctx, d.pool, []int64{row.ID}, s.claimedBy(), perJob); err != nil {
+				d.cfg.Logger.Warn("dispatcher: per-job lease bump",
+					"session", s.id, "job_name", row.JobName, "row", row.ID, "err", err)
+				// Non-fatal; fall back to the queue-default lease.
+				rowLeaseUntil = leaseUntil
+			}
+		}
+
 		// Build the Dispatch envelope. Bookkeep + push to outbox.
 		dispatch := buildDispatch(&row)
 		ackBy := time.Now().Add(time.Duration(d.cfg.AckTimeoutMS) * time.Millisecond)
-		if !s.recordDispatch(dispatch, leaseUntil, ackBy) {
+		if !s.recordDispatch(dispatch, rowLeaseUntil, ackBy) {
 			d.cfg.Logger.Warn("dispatcher: outbox full (worker likely wedged)",
 				"session", s.id, "queue", queue)
 			d.releaseClaimed(ctx, row.ID, s.claimedBy(), "outbox_full")
@@ -488,51 +514,120 @@ func (d *Dispatcher) untrackInflight(jobID int64) *session {
 }
 
 // handleHeartbeat is a batched lease bump. Validates that the
-// supplied job ids actually belong to this session before extending,
-// so a buggy worker can't bump a peer's leases.
-func (d *Dispatcher) handleHeartbeat(ctx context.Context, s *session, hb *Heartbeat) {
+// supplied job ids actually belong to this session before enqueueing
+// them onto the batched lease processor — synchronous PG hits used
+// to wedge the recv loop here under load.
+func (d *Dispatcher) handleHeartbeat(_ context.Context, s *session, hb *Heartbeat) {
 	if len(hb.JobIDs) == 0 {
 		return
 	}
 	if len(hb.JobIDs) > MaxHeartbeatIDsPerFrame {
 		hb.JobIDs = hb.JobIDs[:MaxHeartbeatIDsPerFrame]
 	}
-	owned := make([]int64, 0, len(hb.JobIDs))
-	for _, id := range hb.JobIDs {
-		s.inflightMu.Lock()
-		_, ok := s.inflight[id]
-		s.inflightMu.Unlock()
-		if ok {
-			owned = append(owned, id)
-		}
-	}
-	if len(owned) == 0 {
-		return
-	}
-	if err := jobs.ExtendLease(ctx, d.pool, owned, s.claimedBy(), d.cfg.HeartbeatBudget); err != nil {
-		d.cfg.Logger.Warn("dispatcher: heartbeat extend", "session", s.id, "err", err)
-		return
-	}
-	s.noteHeartbeat()
-	// Also bump the in-memory ackBy clock so the sweeper doesn't
-	// revoke a row whose worker IS alive (Heartbeat without Ack is a
-	// valid state for jobs the worker has fully accepted but hasn't
-	// signaled Ack on, e.g. paused for handler-side resource).
 	now := time.Now()
 	newAckBy := now.Add(time.Duration(d.cfg.AckTimeoutMS) * time.Millisecond)
-	newLease := now.Add(d.cfg.HeartbeatBudget)
+	owned := 0
 	s.inflightMu.Lock()
-	for _, id := range owned {
-		row := s.inflight[id]
-		row.leaseUntil = newLease
+	for _, id := range hb.JobIDs {
+		row, ok := s.inflight[id]
+		if !ok {
+			continue
+		}
+		owned++
+		// Per-job heartbeat override applies to lease bumps too — a
+		// row dispatched with `heartbeat 10m` keeps a 10m lease window
+		// on every subsequent heartbeat, not just the initial claim.
+		row.leaseUntil = now.Add(s.leaseDurFor(row.jobName, d.cfg.HeartbeatBudget))
 		if !row.ackReceived {
 			row.ackBy = newAckBy
 		}
 		s.inflight[id] = row
+		d.enqueueLeaseBump(s, id)
 	}
 	s.inflightMu.Unlock()
+	if owned == 0 {
+		return
+	}
+	s.noteHeartbeat()
 	s.appendEvent(sessionEvent{
 		At: now, Kind: "heartbeat_received", Note: "bumped_leases",
+	})
+}
+
+// handleCheckpoint persists progress for one in-flight job and
+// extends its lease. Distinct from heartbeat because the SDK sends
+// it immediately when a handler calls jobs.Checkpoint — operators
+// see the new progress_pct without waiting for the next auto-tick.
+func (d *Dispatcher) handleCheckpoint(ctx context.Context, s *session, cp *Checkpoint) {
+	if cp.JobID == 0 {
+		return
+	}
+	// Defensive clamps. The SDK already does this, but a malicious
+	// or buggy worker can't blow up a SMALLINT column or write a
+	// multi-megabyte progress_msg.
+	pct := cp.Pct
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	msg := cp.Msg
+	if len(msg) > MaxCheckpointMsgChars {
+		msg = msg[:MaxCheckpointMsgChars]
+	}
+
+	// Ownership check: validate the row belongs to this session
+	// before we write — protects against a buggy worker pushing
+	// progress for a job that was revoked under it.
+	s.inflightMu.Lock()
+	row, ok := s.inflight[cp.JobID]
+	if ok {
+		// Bump the in-memory clocks the same way handleHeartbeat
+		// does so the ack-timeout sweeper doesn't revoke a row whose
+		// worker is alive-and-progressing. Honor the per-job override
+		// so a `heartbeat 10m` row keeps its 10m window on each
+		// checkpoint instead of decaying to the global budget.
+		now := time.Now()
+		row.leaseUntil = now.Add(s.leaseDurFor(row.jobName, d.cfg.HeartbeatBudget))
+		if !row.ackReceived {
+			row.ackBy = now.Add(time.Duration(d.cfg.AckTimeoutMS) * time.Millisecond)
+		}
+		s.inflight[cp.JobID] = row
+	}
+	s.inflightMu.Unlock()
+	if !ok {
+		// Stale checkpoint for an unknown / already-revoked row.
+		// Log debug-level; this is normal during reconnection races.
+		d.cfg.Logger.Debug("dispatcher: checkpoint for unknown row",
+			"session", s.id, "job_id", cp.JobID)
+		return
+	}
+
+	// Lease bump via the batched processor — same path as heartbeat.
+	d.enqueueLeaseBump(s, cp.JobID)
+
+	// Persist progress. Errors are logged + ignored: progress is
+	// best-effort, lease extension is what matters. Nil pool is the
+	// unit-test path — exercises the in-memory state machine without
+	// requiring a database.
+	if d.pool != nil {
+		if _, err := d.pool.Exec(ctx, `
+UPDATE atlantis.jobs
+   SET progress_pct = $1,
+       progress_msg = $2,
+       progress_at  = now()
+ WHERE id = $3 AND claimed_by = $4`, pct, msg, cp.JobID, s.claimedBy()); err != nil {
+			d.cfg.Logger.Warn("dispatcher: checkpoint persist",
+				"session", s.id, "job_id", cp.JobID, "err", err)
+		}
+	}
+
+	s.noteHeartbeat()
+	s.appendEvent(sessionEvent{
+		At: time.Now(), Kind: "checkpoint", JobID: cp.JobID,
+		JobName: row.jobName,
+		Note:    fmt.Sprintf("%d%%: %s", pct, msg),
 	})
 }
 

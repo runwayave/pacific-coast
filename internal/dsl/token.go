@@ -121,6 +121,7 @@ const (
 	TokQueue
 	TokRetries
 	TokTimeout
+	TokHeartbeat
 
 	// TokEnqueue marks the `enqueue <Job>(args...)` step that appears
 	// inside a procedure body. Atomic with the procedure transaction:
@@ -244,6 +245,7 @@ var tokenNames = map[TokenKind]string{
 	TokQueue:          "queue",
 	TokRetries:        "retries",
 	TokTimeout:        "timeout",
+	TokHeartbeat:      "heartbeat",
 	TokEnqueue:        "enqueue",
 	TokVisibleTo:      "visible_to",
 	TokTtlField:       "ttl_field",
@@ -341,6 +343,7 @@ var keywords = map[string]TokenKind{
 	"queue":      TokQueue,
 	"retries":    TokRetries,
 	"timeout":    TokTimeout,
+	"heartbeat":  TokHeartbeat,
 	"enqueue":    TokEnqueue,
 	"visible_to": TokVisibleTo,
 	"ttl_field":  TokTtlField,

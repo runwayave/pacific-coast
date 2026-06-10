@@ -13,7 +13,7 @@ func newTestSession(t *testing.T) *session {
 		MaxInFlight: 4,
 		PodID:       "test-pod",
 	}
-	return newSession(open, "vendor", nil)
+	return newSession(open, "vendor", nil, nil)
 }
 
 func TestSession_AvailableSlotsStartsAtMax(t *testing.T) {
@@ -136,7 +136,7 @@ func TestSession_MaxInFlightClamped(t *testing.T) {
 		{"above_max", 9999, MaxMaxInFlight},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newSession(&OpenSession{Queue: "q", JobNames: []string{"x"}, MaxInFlight: tc.in}, "c", nil)
+			s := newSession(&OpenSession{Queue: "q", JobNames: []string{"x"}, MaxInFlight: tc.in}, "c", nil, nil)
 			if s.maxInFlight != tc.want {
 				t.Errorf("MaxInFlight=%d → got %d, want %d", tc.in, s.maxInFlight, tc.want)
 			}

@@ -749,9 +749,11 @@ type JobDecl struct {
 	Args []*FieldDecl
 
 	// Runtime modifiers. Zero values mean atlantis defaults
-	// (Retries = 0, Timeout = 30m, Queue = "default", Schedule = "").
+	// (Retries = 0, Timeout = 30m, Queue = "default", Schedule = "",
+	// Heartbeat = server's HeartbeatBudget).
 	Retries   *JobRetries
 	Timeout   *JobTimeout
+	Heartbeat *JobHeartbeat
 	Queue     *JobQueue
 	Schedule  *JobSchedule
 	VisibleTo *JobVisibleTo
@@ -783,6 +785,24 @@ type JobRetries struct {
 // expiry is computed from this value (lease = timeout * 1.5 by
 // default; documented in jobs runtime config).
 type JobTimeout struct {
+	Pos      Position
+	Duration string // verbatim duration token text; parsed at IR-lowering time
+}
+
+// JobHeartbeat: `heartbeat 10m` — per-attempt lease budget for the
+// dispatched-worker dispatcher. The dispatcher writes this duration
+// into atlantis.jobs.claimed_until at claim time; the worker has
+// until then to send a Heartbeat or Checkpoint envelope, after which
+// the dispatcher revokes and re-dispatches.
+//
+// Zero (unset) means "use the server's global HeartbeatBudget."
+// Operators set this on jobs whose handlers do IO-bound work that
+// genuinely exceeds the default (Shopify product fetches, video
+// encoding, ML training). It does NOT relax the per-attempt timeout
+// — that's the separate `timeout` modifier and bounds how long a
+// SINGLE handler invocation runs. The heartbeat budget bounds how
+// often the worker must signal liveness.
+type JobHeartbeat struct {
 	Pos      Position
 	Duration string // verbatim duration token text; parsed at IR-lowering time
 }

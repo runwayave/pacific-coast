@@ -372,10 +372,16 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	var dispatcher *jobsdispatcher.Dispatcher
 	if cfg.JobsDispatcherEnabled {
 		dispatcher = jobsdispatcher.New(pool.Raw(), jobsdispatcher.Config{
-			HeartbeatBudget: 30 * time.Second,
+			// 5-minute default is the Temporal-aligned lease budget
+			// for long-running handlers. Short-running handlers can
+			// override down via the DSL `heartbeat 30s` modifier;
+			// long-running ones override up via `heartbeat 10m`.
+			// (Auto-heartbeat tick is HeartbeatBudget/3, sent to the
+			// SDK via SessionAccepted at session open.)
+			HeartbeatBudget: 5 * time.Minute,
 			DrainInterval:   time.Second,
 			BatchSize:       50,
-			AckTimeoutMS:    15000,
+			AckTimeoutMS:    150000, // HeartbeatBudget / 2
 			ShutdownBudget:  30 * time.Second,
 			PodID:           podID(),
 			IRLoader: func(_ context.Context) (*dsl.IR, error) {

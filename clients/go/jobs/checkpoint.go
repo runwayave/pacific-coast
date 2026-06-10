@@ -15,22 +15,32 @@ import (
 type checkpointerKey struct{}
 
 // Checkpointer writes progress updates against atlantis.jobs for one
-// in-flight claim. Constructed by the worker just before handler
-// dispatch; the handler retrieves it via Checkpoint(ctx, ...).
+// in-flight claim. Two implementations: the direct-PG Worker installs
+// a pgCheckpointer that runs an UPDATE against the pool; the
+// DispatchedWorker installs a streamCheckpointer that emits a
+// CheckpointMsg envelope over the gRPC control channel.
 //
-// Writes are best-effort: a failed UPDATE doesn't fail the handler.
+// Writes are best-effort: a failed Report doesn't fail the handler.
 // The progress columns are advisory, not part of the job's commit
-// semantics; the worker's terminal markComplete / reportFailure are
-// the source of truth for whether the job ran.
-type Checkpointer struct {
+// semantics; the worker's terminal Complete / Fail signals are the
+// source of truth for whether the job ran.
+type Checkpointer interface {
+	Report(ctx context.Context, pct int, msg string) error
+}
+
+// pgCheckpointer is the direct-PG implementation used by the
+// SDK Worker (clients/go/jobs/runner.go). Hits atlantis.jobs from
+// the worker's own pool — assumes the worker has PG creds.
+type pgCheckpointer struct {
 	pool  *pgxpool.Pool
 	jobID int64
 }
 
-// newCheckpointer constructs a Checkpointer bound to a single
-// claimed row. Called by the worker before handler dispatch.
-func newCheckpointer(pool *pgxpool.Pool, jobID int64) *Checkpointer {
-	return &Checkpointer{pool: pool, jobID: jobID}
+// newCheckpointer constructs the direct-PG flavor of Checkpointer.
+// Called by the direct-PG Worker before handler dispatch. The
+// DispatchedWorker uses newStreamCheckpointer instead.
+func newCheckpointer(pool *pgxpool.Pool, jobID int64) Checkpointer {
+	return &pgCheckpointer{pool: pool, jobID: jobID}
 }
 
 // Report writes a progress snapshot to atlantis.jobs. pct must be
@@ -38,7 +48,7 @@ func newCheckpointer(pool *pgxpool.Pool, jobID int64) *Checkpointer {
 // erroring so a sloppy handler call doesn't fail an otherwise-
 // healthy job. msg is a free-form short label the operator sees
 // in `tide job status`.
-func (c *Checkpointer) Report(ctx context.Context, pct int, msg string) error {
+func (c *pgCheckpointer) Report(ctx context.Context, pct int, msg string) error {
 	if c == nil || c.pool == nil {
 		return errors.New("jobs: nil checkpointer")
 	}
@@ -71,7 +81,7 @@ UPDATE atlantis.jobs
 // is the same as OpenTelemetry's no-op tracer when no provider is
 // configured.
 func Checkpoint(ctx context.Context, pct int, msg string) error {
-	c, ok := ctx.Value(checkpointerKey{}).(*Checkpointer)
+	c, ok := ctx.Value(checkpointerKey{}).(Checkpointer)
 	if !ok || c == nil {
 		return nil
 	}
@@ -80,6 +90,6 @@ func Checkpoint(ctx context.Context, pct int, msg string) error {
 
 // withCheckpointer returns ctx wrapped with a Checkpointer the
 // handler can retrieve via Checkpoint. Internal to the worker.
-func withCheckpointer(ctx context.Context, c *Checkpointer) context.Context {
+func withCheckpointer(ctx context.Context, c Checkpointer) context.Context {
 	return context.WithValue(ctx, checkpointerKey{}, c)
 }

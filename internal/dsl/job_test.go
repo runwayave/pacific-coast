@@ -37,6 +37,7 @@ job ShopifyImport in vendor {
   }
   retries 3
   timeout 30m
+  heartbeat 10m
   queue "shopify"
   schedule "0 */15 * * *"
 }
@@ -48,6 +49,9 @@ job ShopifyImport in vendor {
 	if j.Timeout == nil || j.Timeout.Duration != "30m" {
 		t.Fatalf("timeout = %+v", j.Timeout)
 	}
+	if j.Heartbeat == nil || j.Heartbeat.Duration != "10m" {
+		t.Fatalf("heartbeat = %+v", j.Heartbeat)
+	}
 	if j.Queue == nil || j.Queue.Name != "shopify" {
 		t.Fatalf("queue = %+v", j.Queue)
 	}
@@ -56,6 +60,40 @@ job ShopifyImport in vendor {
 	}
 	if len(j.Args) != 2 {
 		t.Fatalf("args = %+v", j.Args)
+	}
+}
+
+func TestParse_Job_HeartbeatLowersToMS(t *testing.T) {
+	f := mustParse(t, `
+job LongHandler in vendor {
+  args { x int }
+  heartbeat 10m
+}
+`)
+	ir, err := Lower([]*File{f})
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+	if len(ir.Jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(ir.Jobs))
+	}
+	got := ir.Jobs[0].HeartbeatMS
+	want := 10 * 60 * 1000 // 10 minutes in ms
+	if got != want {
+		t.Errorf("HeartbeatMS = %d, want %d", got, want)
+	}
+}
+
+func TestParse_Job_HeartbeatRejectsInvalid(t *testing.T) {
+	f := mustParse(t, `
+job Bad in vendor {
+  args { x int }
+  heartbeat 0s
+}
+`)
+	_, err := Lower([]*File{f})
+	if err == nil {
+		t.Fatal("expected lowering error for heartbeat 0s")
 	}
 }
 
@@ -216,7 +254,7 @@ job Cleanup in c { args { y int not null } }
 
 func TestParse_Job_RejectsUnknownModifier(t *testing.T) {
 	err := mustParseErr(t, `job J in v { args { x int not null } cache { read_through ttl=10m } }`)
-	if !strings.Contains(err.Error(), "expected 'args', 'retries', 'timeout', 'queue', 'schedule'") {
+	if !strings.Contains(err.Error(), "expected 'args', 'retries', 'timeout', 'heartbeat', 'queue', 'schedule'") {
 		t.Fatalf("error message lacks hint: %v", err)
 	}
 }

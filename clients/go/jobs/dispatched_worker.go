@@ -100,10 +100,20 @@ type DispatchedWorker struct {
 	inflightWG  sync.WaitGroup
 	inflightCnt atomic.Int32
 
-	// sendCh serializes outbound envelopes — every goroutine that
-	// wants to write Hello / Heartbeat / Ack / Complete / Fail pushes
-	// here and the sender goroutine forwards in order.
-	sendCh chan *WorkerEnvelope
+	// dataCh and ctrlCh split the outbound envelope stream into a
+	// data plane (Ack / Complete / Fail — terminal job state) and a
+	// control plane (Heartbeat / Checkpoint — liveness + progress).
+	//
+	// runSender drains ctrlCh with priority via a two-stage select so
+	// data-plane backpressure can't drown out liveness signals. Before
+	// this split, when many handlers blocked simultaneously the
+	// single shared channel would fill with terminal envelopes and
+	// the auto-heartbeat goroutine's payloads would be silently
+	// dropped by the non-blocking default: clause — server saw stale
+	// heartbeats, leases expired, dispatcher revoked + re-dispatched.
+	// Producing the loop we observed on 2026-06-10.
+	dataCh chan *WorkerEnvelope
+	ctrlCh chan *WorkerEnvelope
 
 	// Bookkeeping captured from SessionAccepted.
 	heartbeatInterval atomic.Int64 // ns
@@ -136,7 +146,13 @@ func NewDispatchedWorker(conn *grpc.ClientConn, registry *Registry, queue string
 		queue:    queue,
 		cfg:      cfg,
 		inflight: make(map[int64]context.CancelFunc),
-		sendCh:   make(chan *WorkerEnvelope, cfg.MaxInFlight*2),
+		// ctrlCh is small but bursty (one heartbeat per HeartbeatMS,
+		// plus one Checkpoint per Checkpoint call). Sized for ~30s of
+		// queueing at typical cadence.
+		ctrlCh: make(chan *WorkerEnvelope, cfg.MaxInFlight+8),
+		// dataCh sees one Ack per Dispatch and one Complete/Fail per
+		// terminal — bounded by inflight, sized at 2x for headroom.
+		dataCh: make(chan *WorkerEnvelope, cfg.MaxInFlight*2),
 	}
 }
 
@@ -299,15 +315,62 @@ func (w *DispatchedWorker) runRecv(ctx context.Context, stream grpc.ClientStream
 	}
 }
 
+// streamCheckpointer is the DispatchedWorker's Checkpointer
+// implementation. Where the direct-PG Worker's pgCheckpointer hits
+// the database from its own pool, this one emits a CheckpointMsg
+// envelope over the gRPC control channel — atlantis's dispatcher
+// receives it and persists the progress columns on the worker's
+// behalf. Handler code is portable: jobs.Checkpoint(ctx, pct, msg)
+// works the same way regardless of which Worker is hosting it.
+type streamCheckpointer struct {
+	w     *DispatchedWorker
+	jobID int64
+}
+
+func newStreamCheckpointer(w *DispatchedWorker, jobID int64) Checkpointer {
+	return &streamCheckpointer{w: w, jobID: jobID}
+}
+
+// Report sends a CheckpointMsg via the priority control channel.
+// Clamps pct to [0, 100] and truncates msg to MaxCheckpointMsgChars
+// before sending so the server's identical defensive limits never
+// have to actually reject a payload from a well-behaved SDK.
+func (c *streamCheckpointer) Report(_ context.Context, pct int, msg string) error {
+	if c == nil || c.w == nil {
+		return errors.New("jobs: nil stream checkpointer")
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	if len(msg) > MaxCheckpointMsgChars {
+		msg = msg[:MaxCheckpointMsgChars]
+	}
+	c.w.enqueueCtrl(&WorkerEnvelope{Checkpoint: &CheckpointMsg{
+		JobID: c.jobID,
+		Pct:   pct,
+		Msg:   msg,
+	}})
+	return nil
+}
+
+// MaxCheckpointMsgChars mirrors the server-side cap in
+// internal/server/jobsdispatcher/proto.go. Sync these constants.
+const MaxCheckpointMsgChars = 256
+
 // handleDispatch spins a handler goroutine for one job. Sends Ack
-// immediately, then runs the handler, then sends Complete or Fail.
+// immediately, installs a stream checkpointer in the handler ctx so
+// jobs.Checkpoint(ctx, pct, msg) routes through the stream, then runs
+// the handler, then sends Complete or Fail.
 func (w *DispatchedWorker) handleDispatch(ctx context.Context, d *Dispatch) {
 	handler := w.registry.Lookup(d.JobName)
 	if handler == nil {
 		// No handler — treat as transient fail. Worker doesn't know
 		// whether a sibling worker on a different pod has the handler;
 		// surface it and let atlantis re-route.
-		w.enqueueSend(&WorkerEnvelope{Fail: &Fail{
+		w.enqueueData(&WorkerEnvelope{Fail: &Fail{
 			JobID: d.JobID,
 			Error: fmt.Sprintf("handler %q not registered", d.JobName),
 			Retry: true,
@@ -316,12 +379,17 @@ func (w *DispatchedWorker) handleDispatch(ctx context.Context, d *Dispatch) {
 	}
 
 	// Ack first — atlantis's missing-Ack sweeper revokes if we don't.
-	w.enqueueSend(&WorkerEnvelope{Ack: &Ack{JobID: d.JobID}})
+	w.enqueueData(&WorkerEnvelope{Ack: &Ack{JobID: d.JobID}})
 
 	handlerCtx, cancel := context.WithCancel(ctx)
 	if d.TimeoutMS > 0 {
 		handlerCtx, cancel = context.WithTimeout(ctx, time.Duration(d.TimeoutMS)*time.Millisecond)
 	}
+	// Install the stream checkpointer so the handler's jobs.Checkpoint
+	// calls route through the priority ctrl channel. Same interface
+	// the direct-PG worker installs — handlers don't know which
+	// backend is running them.
+	handlerCtx = withCheckpointer(handlerCtx, newStreamCheckpointer(w, d.JobID))
 	w.inflightMu.Lock()
 	w.inflight[d.JobID] = cancel
 	w.inflightMu.Unlock()
@@ -337,7 +405,7 @@ func (w *DispatchedWorker) handleDispatch(ctx context.Context, d *Dispatch) {
 			if rec := recover(); rec != nil {
 				w.cfg.Logger.Error("dispatched worker: handler panic",
 					"job_name", d.JobName, "job_id", d.JobID, "panic", rec)
-				w.enqueueSend(&WorkerEnvelope{Fail: &Fail{
+				w.enqueueData(&WorkerEnvelope{Fail: &Fail{
 					JobID: d.JobID,
 					Error: fmt.Sprintf("handler panic: %v", rec),
 					Retry: true,
@@ -346,10 +414,10 @@ func (w *DispatchedWorker) handleDispatch(ctx context.Context, d *Dispatch) {
 		}()
 		err := handler.Handle(handlerCtx, d.Args)
 		if err == nil {
-			w.enqueueSend(&WorkerEnvelope{Complete: &Complete{JobID: d.JobID}})
+			w.enqueueData(&WorkerEnvelope{Complete: &Complete{JobID: d.JobID}})
 			return
 		}
-		w.enqueueSend(&WorkerEnvelope{Fail: &Fail{
+		w.enqueueData(&WorkerEnvelope{Fail: &Fail{
 			JobID: d.JobID,
 			Error: err.Error(),
 			Retry: true,
@@ -394,7 +462,7 @@ func (w *DispatchedWorker) runHeartbeat(ctx context.Context) {
 			if len(ids) == 0 {
 				continue
 			}
-			w.enqueueSend(&WorkerEnvelope{Heartbeat: &Heartbeat{JobIDs: ids}})
+			w.enqueueCtrl(&WorkerEnvelope{Heartbeat: &Heartbeat{JobIDs: ids}})
 		}
 	}
 }
@@ -409,30 +477,74 @@ func (w *DispatchedWorker) snapshotInflightIDs() []int64 {
 	return out
 }
 
-// runSender pulls envelopes from sendCh and writes them. Used by
-// every goroutine that wants to push something — serializing through
-// one writer eliminates the worry about concurrent SendMsg calls.
+// runSender pulls envelopes from ctrlCh (with priority) and dataCh
+// and writes them to the stream. Serializing through one goroutine
+// eliminates concurrent SendMsg calls; the priority-select on
+// ctrlCh ensures liveness signals (Heartbeat/Checkpoint) flush
+// before terminal envelopes (Ack/Complete/Fail) when both are
+// pending. This is the structural fix for the stale-heartbeat bug.
 func (w *DispatchedWorker) runSender(ctx context.Context, stream grpc.ClientStream) {
+	send := func(env *WorkerEnvelope) bool {
+		if err := sendOnStream(stream, env); err != nil {
+			w.cfg.Logger.Warn("dispatched worker: send", "err", err)
+			return false
+		}
+		return true
+	}
 	for {
+		// Stage 1: ctx + ctrlCh only. If a control envelope is
+		// ready, dispatch it before reading from dataCh — heartbeats
+		// can't be drowned out by terminal-envelope volume.
 		select {
 		case <-ctx.Done():
 			return
-		case env := <-w.sendCh:
-			if err := sendOnStream(stream, env); err != nil {
-				w.cfg.Logger.Warn("dispatched worker: send", "err", err)
+		case env := <-w.ctrlCh:
+			if !send(env) {
+				return
+			}
+			continue
+		default:
+		}
+		// Stage 2: nothing on ctrlCh right now; read from either.
+		select {
+		case <-ctx.Done():
+			return
+		case env := <-w.ctrlCh:
+			if !send(env) {
+				return
+			}
+		case env := <-w.dataCh:
+			if !send(env) {
 				return
 			}
 		}
 	}
 }
 
-func (w *DispatchedWorker) enqueueSend(env *WorkerEnvelope) {
+// enqueueCtrl pushes liveness envelopes (Heartbeat / Checkpoint).
+// runSender drains this channel with priority so a saturated data
+// plane can't drop heartbeats.
+func (w *DispatchedWorker) enqueueCtrl(env *WorkerEnvelope) {
 	select {
-	case w.sendCh <- env:
+	case w.ctrlCh <- env:
 	default:
-		// Full send chan = server isn't receiving. Drop with a log.
-		// On the next reconnect, in-flight bookkeeping is re-built.
-		w.cfg.Logger.Error("dispatched worker: send channel full, dropping",
+		// Should be exceedingly rare: ctrlCh is sized for the typical
+		// burst window. If we ever see this log in prod, bump the
+		// capacity at construction; don't drop heartbeats silently.
+		w.cfg.Logger.Error("dispatched worker: ctrl channel full, dropping",
+			"variant", envelopeVariant(env))
+	}
+}
+
+// enqueueData pushes terminal envelopes (Ack / Complete / Fail).
+// Bounded by inflight cap; the only way to fill it is genuine server
+// backpressure, at which point dropping new envelopes is the right
+// thing — atlantis will re-dispatch the row on the next claim.
+func (w *DispatchedWorker) enqueueData(env *WorkerEnvelope) {
+	select {
+	case w.dataCh <- env:
+	default:
+		w.cfg.Logger.Error("dispatched worker: data channel full, dropping",
 			"variant", envelopeVariant(env))
 	}
 }
@@ -559,11 +671,12 @@ const MaxJobNamesPerOpen = 1024
 // duplicated here from the server-side proto.go because the SDK
 // can't depend on internal/server packages. Keep in sync.
 type WorkerEnvelope struct {
-	Open      *OpenSession `json:"open,omitempty"`
-	Heartbeat *Heartbeat   `json:"heartbeat,omitempty"`
-	Ack       *Ack         `json:"ack,omitempty"`
-	Complete  *Complete    `json:"complete,omitempty"`
-	Fail      *Fail        `json:"fail,omitempty"`
+	Open       *OpenSession   `json:"open,omitempty"`
+	Heartbeat  *Heartbeat     `json:"heartbeat,omitempty"`
+	Checkpoint *CheckpointMsg `json:"checkpoint,omitempty"`
+	Ack        *Ack           `json:"ack,omitempty"`
+	Complete   *Complete      `json:"complete,omitempty"`
+	Fail       *Fail          `json:"fail,omitempty"`
 }
 
 type DispatchEnvelope struct {
@@ -583,6 +696,17 @@ type OpenSession struct {
 
 type Heartbeat struct {
 	JobIDs []int64 `json:"job_ids"`
+}
+
+// CheckpointMsg is the wire shape for one progress report. Named
+// with the Msg suffix to avoid colliding with the package-level
+// jobs.Checkpoint() function. Sent immediately on the handler's
+// jobs.Checkpoint(ctx, pct, msg) call — distinct from the auto-
+// heartbeat tick so operators see new progress without waiting.
+type CheckpointMsg struct {
+	JobID int64  `json:"job_id"`
+	Pct   int    `json:"pct,omitempty"`
+	Msg   string `json:"msg,omitempty"`
 }
 
 type Ack struct {

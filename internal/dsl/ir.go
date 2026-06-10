@@ -151,7 +151,15 @@ type Job struct {
 	// back to the 30m default) from "this handler opts out of any
 	// per-attempt deadline" (true; SubmitJob inserts NULL into
 	// atlantis.jobs.timeout_ms so the worker skips context.WithTimeout).
-	TimeoutNone bool     `json:"timeout_none,omitempty"`
+	TimeoutNone bool `json:"timeout_none,omitempty"`
+	// HeartbeatMS sets the per-attempt lease budget for this job's
+	// dispatched workers (the long-running-handler escape hatch).
+	// Zero = use the server's global HeartbeatBudget. Non-zero values
+	// flow through the dispatcher to the per-row leaseUntil at claim
+	// time. Operators set this on jobs whose handlers do genuine
+	// IO-bound work that exceeds the default budget (Shopify imports,
+	// ML training, video encoding).
+	HeartbeatMS int      `json:"heartbeat_ms,omitempty"`
 	Queue       string   `json:"queue,omitempty"`
 	Schedule    string   `json:"schedule,omitempty"`
 	VisibleTo   string   `json:"visible_to,omitempty"` // caller name or "*"; empty = unrestricted
@@ -2022,6 +2030,17 @@ func lowerJob(path string, d *JobDecl) (*Job, []error) {
 			} else {
 				job.TimeoutMS = ms
 			}
+		}
+	}
+	if d.Heartbeat != nil {
+		ms, perr := parseDurationMS(d.Heartbeat.Duration)
+		switch {
+		case perr != nil:
+			errs = append(errs, fmt.Errorf("%s: invalid heartbeat %q: %v", d.Heartbeat.Pos, d.Heartbeat.Duration, perr))
+		case ms <= 0:
+			errs = append(errs, fmt.Errorf("%s: heartbeat must be positive, got %q", d.Heartbeat.Pos, d.Heartbeat.Duration))
+		default:
+			job.HeartbeatMS = ms
 		}
 	}
 	if d.Queue != nil {
