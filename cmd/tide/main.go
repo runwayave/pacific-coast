@@ -78,6 +78,8 @@ func main() {
 		os.Exit(cmdRollback(os.Args[2:]))
 	case "sandbox":
 		os.Exit(cmdSandbox(os.Args[2:]))
+	case "caller":
+		os.Exit(cmdCaller(os.Args[2:]))
 	case "version":
 		cliout.Logo(os.Stdout, "tide", version)
 	default:
@@ -104,6 +106,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       tide blame    <entity-id>")
 	fmt.Fprintln(os.Stderr, "       tide owners")
 	fmt.Fprintln(os.Stderr, "       tide rollback --to=<version> [--dry-run] [--yes]")
+	fmt.Fprintln(os.Stderr, "       tide caller   alias list|add|rm <caller> [alias]")
 	fmt.Fprintln(os.Stderr, "       tide version")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Reads ./tide.yaml for schema paths and atlantis endpoint.")

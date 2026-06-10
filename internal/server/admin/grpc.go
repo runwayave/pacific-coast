@@ -85,6 +85,8 @@ type AdminServer interface {
 	GetWorkerSession(context.Context, GetWorkerSessionRequest) (*GetWorkerSessionResponse, error)
 	DrainWorker(context.Context, DrainWorkerRequest) (*DrainWorkerResponse, error)
 	EvictWorker(context.Context, EvictWorkerRequest) (*EvictWorkerResponse, error)
+	GetCallerAliases(context.Context, GetCallerAliasesRequest) (*GetCallerAliasesResponse, error)
+	SetCallerAliases(context.Context, SetCallerAliasesRequest) (*SetCallerAliasesResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -136,6 +138,8 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "GetWorkerSession", Handler: handleGetWorkerSession},
 		{MethodName: "DrainWorker", Handler: handleDrainWorker},
 		{MethodName: "EvictWorker", Handler: handleEvictWorker},
+		{MethodName: "GetCallerAliases", Handler: handleGetCallerAliases},
+		{MethodName: "SetCallerAliases", Handler: handleSetCallerAliases},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "atlantis/admin/v1/admin.proto",
@@ -1096,6 +1100,70 @@ func handleEvictWorker(srv any, ctx context.Context, dec func(any) error, interc
 
 func invokeEvictWorker(svc *Service, ctx context.Context, req *EvictWorkerRequest) (any, error) {
 	resp, err := svc.EvictWorker(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+// --- Caller alias RPCs ---
+
+func handleGetCallerAliases(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetCallerAliasesRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeGetCallerAliases(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetCallerAliases"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetCallerAliases(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetCallerAliases(svc *Service, ctx context.Context, req *GetCallerAliasesRequest) (any, error) {
+	resp, err := svc.GetCallerAliases(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleSetCallerAliases(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req SetCallerAliasesRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeSetCallerAliases(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/SetCallerAliases"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeSetCallerAliases(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeSetCallerAliases(svc *Service, ctx context.Context, req *SetCallerAliasesRequest) (any, error) {
+	resp, err := svc.SetCallerAliases(ctx, *req)
 	if err != nil {
 		return nil, err
 	}

@@ -382,6 +382,12 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 				ir, _, err := loadIRCheckpoint(pool)
 				return ir, err
 			},
+			// Alias loader lets the dispatcher accept a caller whose CN
+			// satisfies visible_to via an operator-configured alias
+			// (PostgreSQL-roles / AD-SID / DNS-CNAME pattern). Fetched
+			// once per stream at Open; cached on the session for its
+			// lifetime so steady-state workers never re-fetch.
+			AliasLoader:       adminSvc.LookupCallerAliases,
 			CallerFromContext: callerFromContext,
 			Logger:            log.With("component", "jobs-dispatcher"),
 		})

@@ -30,18 +30,23 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// CheckWorkerAuthz verifies the caller CN is authorized to handle
-// every job in jobNames. Returns a gRPC status error on the first
-// mismatch so the streaming handler can `return err` to close the
-// stream with the right code.
+// CheckWorkerAuthz verifies the caller CN (with its configured
+// aliases) is authorized to handle every job in jobNames. Returns a
+// gRPC status error on the first mismatch so the streaming handler
+// can `return err` to close the stream with the right code.
 //
-// callerCN is the cert CN ("anonymous" in insecure dev mode). When
-// dev mode is enabled, the caller still has to declare which jobs
-// they handle — we don't auto-allow everything for anonymous, since
-// that would let a misconfigured prod deploy silently bypass authz.
-// Operators wanting dev-mode workers can configure their jobs with
-// `visible_to "anonymous"` or `visible_to "*"`.
-func CheckWorkerAuthz(callerCN string, jobNames []string, ir *dsl.IR) error {
+// callerCN is the cert CN ("anonymous" in insecure dev mode).
+// aliases is the operator-configured alias set for that caller from
+// caller_identities.aliases. A nil/empty aliases slice degenerates to
+// the previous CN-only matching behavior — fully back-compat for
+// callers without aliases set.
+//
+// When dev mode is enabled, the caller still has to declare which
+// jobs they handle — we don't auto-allow everything for anonymous,
+// since that would let a misconfigured prod deploy silently bypass
+// authz. Operators wanting dev-mode workers can configure their jobs
+// with `visible_to "anonymous"` or `visible_to "*"`.
+func CheckWorkerAuthz(callerCN string, aliases []string, jobNames []string, ir *dsl.IR) error {
 	if ir == nil {
 		return status.Error(codes.FailedPrecondition, "no IR loaded; cannot authorize workers")
 	}
@@ -50,7 +55,7 @@ func CheckWorkerAuthz(callerCN string, jobNames []string, ir *dsl.IR) error {
 		if job == nil {
 			return status.Errorf(codes.NotFound, "unknown job %q", name)
 		}
-		if !jobVisibleTo(job, callerCN) {
+		if !jobVisibleTo(job, callerCN, aliases) {
 			return status.Errorf(codes.PermissionDenied,
 				"caller %q not authorized for job %q", callerCN, name)
 		}
@@ -62,7 +67,7 @@ func CheckWorkerAuthz(callerCN string, jobNames []string, ir *dsl.IR) error {
 // One job, returns a plain error so the dispatcher can log it as
 // `authz_rejected_post_open` and release the row instead of failing
 // the whole session.
-func CheckSingleAuthz(callerCN string, jobName string, ir *dsl.IR) error {
+func CheckSingleAuthz(callerCN string, aliases []string, jobName string, ir *dsl.IR) error {
 	if ir == nil {
 		return fmt.Errorf("no IR loaded")
 	}
@@ -70,7 +75,7 @@ func CheckSingleAuthz(callerCN string, jobName string, ir *dsl.IR) error {
 	if job == nil {
 		return fmt.Errorf("unknown job %q", jobName)
 	}
-	if !jobVisibleTo(job, callerCN) {
+	if !jobVisibleTo(job, callerCN, aliases) {
 		return fmt.Errorf("caller %q not authorized for job %q", callerCN, jobName)
 	}
 	return nil
@@ -92,12 +97,22 @@ func lookupJob(ir *dsl.IR, id string) *dsl.Job {
 
 // jobVisibleTo applies the same permissive default that SubmitJob
 // uses: empty or "*" means any caller, otherwise the field must
-// match the caller CN exactly. Mirroring the existing SubmitJob
-// gate (admin/jobs.go) keeps the policy in one mental model.
-func jobVisibleTo(job *dsl.Job, callerCN string) bool {
+// match the caller CN exactly OR any of the caller's configured
+// aliases. Mirroring SubmitJob's gate keeps the policy in one mental
+// model; aliases extend it cleanly without changing the matching
+// semantics for callers that don't use aliases.
+func jobVisibleTo(job *dsl.Job, callerCN string, aliases []string) bool {
 	v := job.VisibleTo
 	if v == "" || v == "*" {
 		return true
 	}
-	return v == callerCN
+	if v == callerCN {
+		return true
+	}
+	for _, a := range aliases {
+		if v == a {
+			return true
+		}
+	}
+	return false
 }

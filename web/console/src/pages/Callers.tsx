@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, Download, Key, Plus, Trash2 } from 'lucide-react'
-import { api, queries, type CallerInfo, type IssueCertResponse } from '@/api/client'
+import { Check, Copy, Download, Key, Link2, Plus, Trash2, X } from 'lucide-react'
+import { api, ApiError, queries, type CallerInfo, type IssueCertResponse } from '@/api/client'
 import { useIsAdmin } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
 import { HoverInfo } from '@/components/HoverInfo'
+import { SudoConfirmDialog } from './Settings'
 
 function fmtDateShort(iso?: string) {
   if (!iso) return '—'
@@ -37,6 +38,7 @@ export function Callers() {
   const [revoking, setRevoking] = useState<string | null>(null)
   const [certBundle, setCertBundle] = useState<{ name: string; bundle: IssueCertResponse } | null>(null)
   const [issuingCaller, setIssuingCaller] = useState<string | null>(null)
+  const [aliasEditing, setAliasEditing] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
   // The design's pages.css gates .callergrid and .callertable behind a
@@ -126,6 +128,7 @@ export function Callers() {
                   onIssue={() => { setIssuingCaller(c.caller); issueM.mutate(c.caller) }}
                   isIssuing={issuingCaller === c.caller}
                   onRevoke={() => setRevoking(c.caller)}
+                  onManageAliases={() => setAliasEditing(c.caller)}
                 />
               ))}
             </div>
@@ -160,6 +163,16 @@ export function Callers() {
         />
       )}
 
+      {aliasEditing && (
+        <AliasesDialog
+          caller={aliasEditing}
+          onClose={(saved) => {
+            setAliasEditing(null)
+            if (saved) showToast(`Aliases updated: ${aliasEditing}`)
+          }}
+        />
+      )}
+
       {toast && (
         <div className="toast-wrap">
           <div className="toast">
@@ -179,12 +192,14 @@ function CallerCard({
   onIssue,
   isIssuing,
   onRevoke,
+  onManageAliases,
 }: {
   caller: CallerInfo
   canAdmin: boolean
   onIssue: () => void
   isIssuing: boolean
   onRevoke: () => void
+  onManageAliases: () => void
 }) {
   // cert_expires_at is populated whenever a cert is issued through the
   // console — see `RecordCallerCertExpiry` on the server. Callers that
@@ -219,6 +234,24 @@ function CallerCard({
         <span className="spacer" style={{ flex: 1 }} />
         {canAdmin && (
           <>
+            <HoverInfo
+              side="bottom"
+              inline
+              content={
+                <>
+                  <p>Configure identity aliases — let this cert satisfy <code className="mono">visible_to</code> for other names.</p>
+                  <p className="hi-foot">Operator-controlled. Auth still uses the cert CN; aliases only widen what visible_to predicates match.</p>
+                </>
+              }
+            >
+              <button
+                className="btn btn--sm btn--ghost btn--icon"
+                onClick={onManageAliases}
+                aria-label="Manage aliases"
+              >
+                <Link2 size={13} />
+              </button>
+            </HoverInfo>
             <HoverInfo
               side="bottom"
               inline
@@ -504,4 +537,241 @@ tls:
       </div>
     </div>
   )
+}
+
+// ── Aliases dialog ──────────────────────────────────────────────────────
+//
+// Aliases let a registered caller's cert CN satisfy `visible_to`
+// predicates declared for other identity names. PostgreSQL-roles /
+// AD-SID / DNS-CNAME pattern: schemas reference roles, deploy-time
+// config maps physical identities to those roles. Identity rename
+// doesn't require schema edits.
+//
+// Aliases are operator-controlled (sudo-gated on save) and never
+// substitute for authentication — they only widen the authz match set.
+function AliasesDialog({
+  caller,
+  onClose,
+}: {
+  caller: string
+  onClose: (saved: boolean) => void
+}) {
+  const qc = useQueryClient()
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['caller-aliases', caller],
+    queryFn: () => api.callers.aliases(caller),
+  })
+
+  const [draft, setDraft] = useState<string[] | null>(null)
+  const [newAlias, setNewAlias] = useState('')
+  const [showSudo, setShowSudo] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  // Hydrate draft once data arrives. Subsequent loads (e.g. background
+  // refetch) shouldn't clobber unsaved edits.
+  useEffect(() => {
+    if (data && draft === null) setDraft([...data.aliases])
+  }, [data, draft])
+
+  const current = draft ?? data?.aliases ?? []
+  const dirty = data ? !arraysEqual(current, data.aliases) : false
+
+  const onAdd = () => {
+    const a = newAlias.trim()
+    if (!a) return
+    if (a === caller) {
+      setSaveError(`Alias cannot equal the caller name (${caller}).`)
+      return
+    }
+    if (current.includes(a)) {
+      setNewAlias('')
+      return
+    }
+    setDraft([...current, a])
+    setNewAlias('')
+    setSaveError(null)
+  }
+
+  const onRemove = (a: string) => {
+    setDraft(current.filter(x => x !== a))
+    setSaveError(null)
+  }
+
+  const save = async (password: string) => {
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await api.auth.sudo(password)
+      await api.callers.setAliases(caller, current)
+      qc.invalidateQueries({ queryKey: ['caller-aliases', caller] })
+      setShowSudo(false)
+      onClose(true)
+    } catch (e) {
+      setSaveError(e instanceof ApiError ? e.message : 'save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // Render sudo gate alone (not stacked) when the operator hits Save —
+  // mirrors the Settings page's "one modal at a time" pattern. Aliases
+  // dialog state is kept in this closure so cancel-from-sudo returns
+  // the operator to the same editing state, not a fresh load.
+  if (showSudo) {
+    return (
+      <SudoConfirmDialog
+        title="Save aliases"
+        icon={<Link2 size={18} />}
+        body={
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <p>
+              Replacing the alias set for <span className="mono">{caller}</span>.
+              {' '}This widens (or narrows) the <code className="mono">visible_to</code> match set
+              immediately for all future authz checks.
+            </p>
+            <p className="muted" style={{ fontSize: 12 }}>
+              Cert authentication is unchanged. Aliases only affect what visible_to predicates this
+              cert satisfies at job-dispatch authz time.
+            </p>
+          </div>
+        }
+        confirmLabel="Save"
+        pending={saving}
+        error={saveError}
+        onCancel={() => setShowSudo(false)}
+        onConfirm={save}
+      />
+    )
+  }
+
+  return (
+    <div
+      className="overlay is-open"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(false) }}
+    >
+      <div className="modal" style={{ width: 520 }} role="dialog" aria-modal>
+          <div className="modal__head">
+            <div className="row" style={{ gap: 10, alignItems: 'center' }}>
+              <Link2 size={16} />
+              <span className="modal__title">Identity aliases</span>
+            </div>
+            <div className="modal__sub">
+              <span className="mono">{caller}</span> — additional names this cert satisfies for{' '}
+              <code className="mono">visible_to</code>
+            </div>
+          </div>
+          <div className="modal__body">
+            {isLoading && <div className="muted">Loading…</div>}
+            {error && (
+              <div className="banner banner--error">
+                {(error as Error).message}
+              </div>
+            )}
+
+            {!isLoading && !error && (
+              <>
+                <div className="field">
+                  <label className="field__label">Current aliases</label>
+                  {current.length === 0 ? (
+                    <div className="faint" style={{ fontSize: 12, padding: '6px 0' }}>
+                      No aliases. Only <span className="mono">visible_to "{caller}"</span> and{' '}
+                      <span className="mono">visible_to "*"</span> match this cert today.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {current.map(a => (
+                        <span
+                          key={a}
+                          className="badge badge--plain mono"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            padding: '4px 4px 4px 10px',
+                            background: 'var(--canvas-3)',
+                            border: '1px solid var(--line-soft)',
+                            borderRadius: 14,
+                          }}
+                        >
+                          {a}
+                          <button
+                            type="button"
+                            onClick={() => onRemove(a)}
+                            className="btn btn--ghost btn--icon"
+                            style={{ width: 18, height: 18, padding: 0, color: 'var(--ink-3)' }}
+                            aria-label={`Remove alias ${a}`}
+                          >
+                            <X size={11} />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="field">
+                  <label className="field__label">Add alias</label>
+                  <div className="row" style={{ gap: 6 }}>
+                    <input
+                      className="input mono"
+                      value={newAlias}
+                      onChange={e => setNewAlias(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') onAdd() }}
+                      placeholder="e.g. vendor"
+                      autoFocus
+                      spellCheck={false}
+                      autoComplete="off"
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      className="btn btn--ghost btn--sm"
+                      onClick={onAdd}
+                      disabled={!newAlias.trim()}
+                    >
+                      <Plus size={12} /> Add
+                    </button>
+                  </div>
+                  <div className="faint" style={{ fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
+                    A schema declaration of <span className="mono">visible_to "X"</span> matches when
+                    the cert CN is X or X appears in this alias list. Reserved names (atlantis*,
+                    anonymous, *) are rejected.
+                  </div>
+                </div>
+
+                {saveError && (
+                  <div className="banner banner--error">{saveError}</div>
+                )}
+              </>
+            )}
+          </div>
+          <div className="modal__foot">
+            <button
+              className="btn btn--ghost"
+              onClick={() => onClose(false)}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn btn--brass"
+              onClick={() => { setSaveError(null); setShowSudo(true) }}
+              disabled={!dirty || isLoading}
+            >
+              {dirty ? 'Save changes' : 'No changes'}
+            </button>
+          </div>
+        </div>
+      </div>
+  )
+}
+
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const as = [...a].sort()
+  const bs = [...b].sort()
+  for (let i = 0; i < as.length; i++) {
+    if (as[i] !== bs[i]) return false
+  }
+  return true
 }

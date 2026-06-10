@@ -25,6 +25,7 @@ import (
 type session struct {
 	id      string
 	caller  string
+	aliases []string // operator-configured aliases at Open; immutable thereafter
 	queue   string
 	podID   string
 	version string
@@ -98,7 +99,7 @@ type sessionEvent struct {
 
 const sessionEventCap = 50
 
-func newSession(open *OpenSession, caller string) *session {
+func newSession(open *OpenSession, caller string, aliases []string) *session {
 	jobNames := make(map[string]struct{}, len(open.JobNames))
 	for _, n := range open.JobNames {
 		jobNames[n] = struct{}{}
@@ -110,9 +111,17 @@ func newSession(open *OpenSession, caller string) *session {
 	if maxIF > MaxMaxInFlight {
 		maxIF = MaxMaxInFlight
 	}
+	// Defensive copy: caller could otherwise mutate the slice after
+	// session registration. The alias set is frozen at Open per the
+	// "stable for the stream's lifetime" contract.
+	var aliasCopy []string
+	if len(aliases) > 0 {
+		aliasCopy = append([]string(nil), aliases...)
+	}
 	s := &session{
 		id:          uuid.NewString(),
 		caller:      caller,
+		aliases:     aliasCopy,
 		queue:       open.Queue,
 		podID:       open.PodID,
 		version:     open.Version,

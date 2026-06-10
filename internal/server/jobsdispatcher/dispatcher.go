@@ -83,6 +83,14 @@ type Config struct {
 	// dispatcher doesn't import the checkpoint storage layer directly.
 	IRLoader func(ctx context.Context) (*dsl.IR, error)
 
+	// AliasLoader returns the configured aliases for a caller from
+	// caller_identities.aliases. Called once per session at Open;
+	// the result is cached on the session for the lifetime of the
+	// stream, so a steady-state worker never re-fetches. A nil
+	// AliasLoader degrades to no-alias matching — equivalent to the
+	// pre-aliases behavior.
+	AliasLoader func(ctx context.Context, caller string) ([]string, error)
+
 	// CallerFromContext extracts the resolved caller identity from a
 	// stream context. Plumbed from cmd/server/auth.go's
 	// callerFromContext so dev mode (no mTLS) and prod mode (cert CN)
@@ -320,7 +328,7 @@ func (d *Dispatcher) drainOnce(ctx context.Context, queue string) {
 		}
 
 		if ir != nil {
-			if authzErr := CheckSingleAuthz(s.caller, row.JobName, ir); authzErr != nil {
+			if authzErr := CheckSingleAuthz(s.caller, s.aliases, row.JobName, ir); authzErr != nil {
 				d.cfg.Logger.Info("dispatcher: authz rejected at dispatch",
 					"session", s.id, "caller", s.caller,
 					"job_id", row.ID, "job_name", row.JobName, "err", authzErr)

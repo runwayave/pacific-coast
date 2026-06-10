@@ -240,6 +240,11 @@ export interface GetCallersResponse {
   callers: CallerInfo[]
 }
 
+export interface CallerAliasesResponse {
+  caller: string
+  aliases: string[]
+}
+
 export interface RevokeCallerResponse {
   files_removed: number
 }
@@ -607,6 +612,15 @@ export const api = {
 
     revokeAll: (): Promise<{ ok: boolean; revoked: number; failures: string[] }> =>
       apiFetch('/api/callers/revoke-all', { method: 'POST' }),
+
+    aliases: (caller: string): Promise<CallerAliasesResponse> =>
+      apiFetch<CallerAliasesResponse>(`/api/callers/${encodeURIComponent(caller)}/aliases`),
+
+    setAliases: (caller: string, aliases: string[]): Promise<CallerAliasesResponse> =>
+      apiFetch<CallerAliasesResponse>(`/api/callers/${encodeURIComponent(caller)}/aliases`, {
+        method: 'PUT',
+        body: JSON.stringify({ aliases }),
+      }),
   },
 
   users: {

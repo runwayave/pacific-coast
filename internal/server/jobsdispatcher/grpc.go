@@ -150,20 +150,40 @@ func (d *Dispatcher) WorkerSession(stream grpc.ServerStream) error {
 
 	caller := d.cfg.CallerFromContext(stream.Context())
 
-	// 2. Authz. Reject the whole session if any requested job is out of scope.
+	// 2. Resolve operator-configured aliases for this caller. Aliases
+	// extend the visible_to match set without requiring schema edits
+	// (PostgreSQL-roles / AD-SID pattern). A nil AliasLoader degrades
+	// to no-alias matching — back-compat for deployments not using
+	// the feature.
+	var aliases []string
+	if d.cfg.AliasLoader != nil {
+		var aliasErr error
+		aliases, aliasErr = d.cfg.AliasLoader(stream.Context(), caller)
+		if aliasErr != nil {
+			// Aliases are an authorization aid, not a hard requirement.
+			// Log + continue with no aliases rather than fail-closing,
+			// so a transient DB blip on the aliases table doesn't take
+			// down every dispatched worker. If the worker's CN alone
+			// is enough to satisfy visible_to, the session still opens.
+			d.cfg.Logger.Warn("dispatcher: alias load at Open",
+				"caller", caller, "err", aliasErr)
+		}
+	}
+
+	// 3. Authz. Reject the whole session if any requested job is out of scope.
 	ir, irErr := d.cfg.IRLoader(stream.Context())
 	if irErr != nil {
 		d.cfg.Logger.Warn("dispatcher: IR load at Open", "caller", caller, "err", irErr)
 		return status.Error(codes.FailedPrecondition, "IR unavailable")
 	}
-	if err := CheckWorkerAuthz(caller, open.JobNames, ir); err != nil {
+	if err := CheckWorkerAuthz(caller, aliases, open.JobNames, ir); err != nil {
 		d.cfg.Logger.Info("dispatcher: authz rejected at Open",
-			"caller", caller, "queue", open.Queue, "err", err)
+			"caller", caller, "aliases", aliases, "queue", open.Queue, "err", err)
 		return err
 	}
 
-	// 3. Register the session.
-	s := newSession(open, caller)
+	// 4. Register the session.
+	s := newSession(open, caller, aliases)
 	d.register(s)
 	defer d.unregister(stream.Context(), s, "stream_closed")
 

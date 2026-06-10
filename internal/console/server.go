@@ -222,6 +222,12 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("POST /api/callers", s.auth(s.requireRole("admin", s.csrf(s.handleRegisterCaller))))
 	mux.HandleFunc("DELETE /api/callers/{caller}", s.auth(s.requireRole("admin", s.csrf(s.handleRevokeCaller))))
 	mux.HandleFunc("POST /api/callers/{caller}/cert/issue", s.auth(s.requireRole("admin", s.csrf(s.handleIssueCert))))
+	// Caller aliases (PR follow-up to the dispatcher security work).
+	// GET is admin role-only; PUT is sudo-gated because changing aliases
+	// widens the visible_to match set for a registered cert.
+	mux.HandleFunc("GET /api/callers/{caller}/aliases", s.auth(s.requireRole("admin", s.handleGetCallerAliases)))
+	mux.HandleFunc("PUT /api/callers/{caller}/aliases",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleSetCallerAliases)))))
 
 	// Schema rollback — mutation, CSRF-protected, admin-only.
 	mux.HandleFunc("POST /api/schema/rollback", s.auth(s.requireRole("admin", s.csrf(s.handleRollbackSchema))))
@@ -1574,6 +1580,54 @@ func (s *Server) handleRegisterCaller(w http.ResponseWriter, r *http.Request) {
 		"can_mutate": body.CanMutate,
 	})
 
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+// handleGetCallerAliases proxies the GetCallerAliases admin RPC. Read-
+// only; gated by admin role at the route. The atlantis-side returns
+// 404-equivalent when the caller isn't registered.
+func (s *Server) handleGetCallerAliases(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	s.proxyRPC(w, r, adminBase+"GetCallerAliases", map[string]string{"caller": caller})
+}
+
+// handleSetCallerAliases proxies the SetCallerAliases admin RPC.
+// Sudo-gated by the route. Audit-logged with the new alias set so an
+// operator review of caller permissions can trace which CN was granted
+// which aliases when.
+func (s *Server) handleSetCallerAliases(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Aliases []string `json:"aliases"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"SetCallerAliases", map[string]any{
+		"caller":  caller,
+		"aliases": body.Aliases,
+	})
+	if err != nil {
+		s.log.Error("SetCallerAliases", "caller", caller, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	s.db.logAction(r.Context(), u.ID, "set_caller_aliases", map[string]any{
+		"caller":  caller,
+		"aliases": body.Aliases,
+	})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
