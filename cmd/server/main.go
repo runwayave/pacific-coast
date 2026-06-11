@@ -272,6 +272,11 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// bypass via the streaming surface.
 	srv := grpc.NewServer(
 		grpc.Creds(creds),
+		// Match the SDK's 64 MiB client receive default (atltransport):
+		// bulk entity Query reads and multi-row batch-procedure writes
+		// (e.g. a page of catalog rows) overflow the 4 MiB gRPC default.
+		grpc.MaxRecvMsgSize(64<<20),
+		grpc.MaxSendMsgSize(64<<20),
 		grpc.ChainUnaryInterceptor(
 			recoveryInterceptor(log),
 			interceptors.NewMetrics(),
