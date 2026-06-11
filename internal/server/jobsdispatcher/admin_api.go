@@ -107,7 +107,15 @@ func (d *Dispatcher) GetSession(sessionID string) (SessionDetail, bool) {
 		return SessionDetail{}, false
 	}
 	detail := SessionDetail{SessionSnapshot: sessionToSnapshot(s)}
+	// Initialize as empty (not nil) slices so they marshal to JSON [] and
+	// not null — the console SPA reads .length on each and a null crashes
+	// the session-detail page once a session has zero in-flight rows.
 	detail.JobNames = s.jobNamesSlice()
+	if detail.JobNames == nil {
+		detail.JobNames = []string{}
+	}
+	detail.Inflight = []InflightDetail{}
+	detail.Events = []EventSnapshot{}
 	for _, row := range s.snapshotInflight() {
 		detail.Inflight = append(detail.Inflight, InflightDetail{
 			JobID:        row.jobID,

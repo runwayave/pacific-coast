@@ -39,7 +39,15 @@ export function WorkerSession() {
       try {
         const res = await api.workers.get(id)
         if (cancelled) return
-        setDetail(res.session)
+        // Normalize array fields: the server marshals empty Go slices as
+        // JSON null, which would crash the `.length` / `.map` calls below
+        // once a session has zero in-flight rows (or no events yet).
+        setDetail({
+          ...res.session,
+          job_names: res.session.job_names ?? [],
+          inflight: res.session.inflight ?? [],
+          events: res.session.events ?? [],
+        })
         setNotFound(false)
         setError(null)
       } catch (e) {
