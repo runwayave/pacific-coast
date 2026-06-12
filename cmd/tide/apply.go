@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rachitkumar205/atlantis/internal/cliout"
@@ -54,6 +55,20 @@ type planResponse struct {
 	BackfillFields         []backfillFieldRef `json:"backfill_fields,omitempty"`
 
 	Extensions []extensionStatus `json:"extensions,omitempty"`
+
+	IndexDrift      []indexDriftItem `json:"index_drift,omitempty"`
+	IndexDriftNotes []string         `json:"index_drift_notes,omitempty"`
+	IndexDriftError string           `json:"index_drift_error,omitempty"`
+}
+
+// indexDriftItem mirrors introspect.UniqueIndexDrift over the JSON wire.
+type indexDriftItem struct {
+	Schema    string   `json:"schema"`
+	Table     string   `json:"table"`
+	IndexName string   `json:"index_name"`
+	Columns   []string `json:"columns"`
+	Partial   bool     `json:"partial,omitempty"`
+	Predicate string   `json:"predicate,omitempty"`
 }
 
 type extensionStatus struct {
@@ -333,6 +348,36 @@ func printImpactReport(p planResponse) {
 		printExtensions(p.Extensions)
 		fmt.Println()
 	}
+	printIndexDrift(p)
+}
+
+// printIndexDrift surfaces live UNIQUE indexes the schema doesn't declare.
+// These don't change the plan class, but `tide apply` will refuse on them
+// unless ATLANTIS_ALLOW_INDEX_DRIFT=1 — so the warning is the operator's
+// heads-up before they commit to applying.
+func printIndexDrift(p planResponse) {
+	if p.IndexDriftError != "" {
+		cliout.Header(os.Stdout, "index drift")
+		cliout.Row(os.Stdout, "warn", "check skipped", p.IndexDriftError)
+		fmt.Println()
+		return
+	}
+	if len(p.IndexDrift) == 0 && len(p.IndexDriftNotes) == 0 {
+		return
+	}
+	cliout.Header(os.Stdout, "index drift")
+	for _, d := range p.IndexDrift {
+		desc := "(" + strings.Join(d.Columns, ", ") + ")"
+		if d.Partial {
+			desc += " WHERE " + d.Predicate
+		}
+		cliout.Row(os.Stdout, "coral", d.Schema+"."+d.IndexName, "undeclared UNIQUE on "+desc)
+		cliout.SubRow(os.Stdout, fmt.Sprintf(`DROP INDEX "%s"."%s";  (or ATLANTIS_ALLOW_INDEX_DRIFT=1 to apply anyway)`, d.Schema, d.IndexName))
+	}
+	for _, n := range p.IndexDriftNotes {
+		cliout.Row(os.Stdout, "muted", "note", n)
+	}
+	fmt.Println()
 }
 
 // collectPCFiles walks every schema path and reads every .atl file. Paths

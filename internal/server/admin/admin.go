@@ -26,6 +26,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
+	"github.com/rachitkumar205/atlantis/internal/introspect"
 	"github.com/rachitkumar205/atlantis/internal/obs"
 )
 
@@ -258,6 +259,15 @@ type PlanResponse struct {
 	// "missing" (operator must install at the OS level — apply refuses).
 	// Empty when the schema needs no extensions.
 	Extensions []extensionStatus `json:"extensions,omitempty"`
+
+	// IndexDrift lists live bare-UNIQUE indexes on declared columns that the
+	// schema doesn't account for (e.g. a pre-adopt `CREATE UNIQUE INDEX`).
+	// Surfaced as a plan-time warning; `tide apply` refuses on a non-empty
+	// list unless ATLANTIS_ALLOW_INDEX_DRIFT=1. Best-effort at plan time —
+	// IndexDriftError carries the message when the check itself couldn't run.
+	IndexDrift      []introspect.UniqueIndexDrift `json:"index_drift,omitempty"`
+	IndexDriftNotes []string                      `json:"index_drift_notes,omitempty"`
+	IndexDriftError string                        `json:"index_drift_error,omitempty"`
 }
 
 // CustomDeclCount tallies custom queries and procedures.
@@ -455,6 +465,17 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 	// effort, and the apply path will hard-refuse if anything's missing.
 	extStatuses, _ := inspectExtensions(ctx, s.pool, newIR)
 
+	// Surface live unique-index drift so `tide plan` warns before apply.
+	// Best-effort and read-only (no lock); the apply path re-checks inside
+	// the locked tx and refuses. Unlike extensions we DON'T swallow the
+	// error silently — a check that couldn't run must not read as "clean,"
+	// so we record it and the operator sees the apply-time surprise coming.
+	indexDrift, driftNotes, driftErr := introspect.DetectUniqueIndexDrift(ctx, s.pool, newIR)
+	var driftErrMsg string
+	if driftErr != nil {
+		driftErrMsg = driftErr.Error()
+	}
+
 	resp := &PlanResponse{
 		PlanID:          computePlanID(req.Caller, callerFiles, prior),
 		Class:           translateClass(d.HighestClass()),
@@ -473,6 +494,9 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 		PostBackfillIndexesSQL: scripts.PostBackfillIndexes,
 		BackfillFields:         translateBackfillFields(scripts.BackfillFields),
 		Extensions:             extStatuses,
+		IndexDrift:             indexDrift,
+		IndexDriftNotes:        driftNotes,
+		IndexDriftError:        driftErrMsg,
 	}
 	for _, ch := range d.Breaking {
 		resp.BreakingDetail = append(resp.BreakingDetail,
@@ -641,6 +665,21 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 	// enable + DDL commit atomically — no half-applied state.
 	if _, err := prepareExtensions(ctx, tx, newIR); err != nil {
 		return nil, err
+	}
+
+	// Refuse to apply over a live UNIQUE index the schema doesn't account
+	// for — applying would leave a hidden constraint silently rejecting
+	// legitimate writes. Read inside the locked tx so the verdict is
+	// authoritative. The operator either drops the index, declares the
+	// uniqueness, or sets ATLANTIS_ALLOW_INDEX_DRIFT=1 to proceed knowingly.
+	if os.Getenv("ATLANTIS_ALLOW_INDEX_DRIFT") != "1" {
+		drift, _, derr := introspect.DetectUniqueIndexDrift(ctx, tx, newIR)
+		if derr != nil {
+			return nil, fmt.Errorf("apply: index-drift check failed: %w", derr)
+		}
+		if len(drift) > 0 {
+			return nil, indexDriftError(drift)
+		}
 	}
 
 	if _, err := tx.Exec(ctx, scripts.Up); err != nil {
