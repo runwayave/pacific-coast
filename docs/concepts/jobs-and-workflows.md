@@ -46,10 +46,10 @@ workflow OnboardAccount in directory {
 Handlers live in your Go binary. atlantis codegen emits a typed interface per job; you implement it and register at server startup:
 
 ```go
-directory.RegisterImportContacts(reg, &myImportHandler{crm: crmClient})
+directory.RegisterImportContacts(reg, &importContactsHandler{crm: crmClient})
 ```
 
-For non-Go handlers, `RegisterRemote(jobID, addr)` dispatches over gRPC to an external service. Any language that can serve a JSON-envelope gRPC endpoint can act as a handler.
+For non-Go handlers, `RegisterRemote(reg, jobID, addr)` dispatches over gRPC to an external service. Any language that can serve a JSON-envelope gRPC endpoint can act as a handler.
 
 ## Submission paths
 
@@ -66,7 +66,7 @@ For non-Go handlers, `RegisterRemote(jobID, addr)` dispatches over gRPC to an ex
 |---|---|---|
 | `retries N` | 0 | Max retry count before DLQ. |
 | `timeout 30m` | 30m | Per-attempt deadline. `timeout none` disables the deadline entirely. |
-| `heartbeat 10m` | 5m | Per-attempt lease window. Widen for handlers that block on a single external call longer than the server's default; narrow to fail fast on quick jobs. |
+| `heartbeat 10m` | 2m | Per-attempt lease window. Widen for handlers that block on a single external call longer than the worker's default; narrow to fail fast on quick jobs. |
 | `queue "name"` | `"default"` | Named queue for partitioning worker pools. |
 | `schedule "cron"` | (none) | Cron spec for periodic invocation. |
 | `visible_to "caller"` | (any) | RBAC: only the named caller can submit. `"*"` for any. |

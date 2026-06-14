@@ -14,7 +14,7 @@ atlantis dispatches each row to exactly one worker at a time. If the worker cras
 The standard pattern is a per-run state table. Each handler invocation opens with:
 
 ```sql
-CREATE TABLE contact_import_runs (
+CREATE TABLE contact_import_state (
   account_id  varchar(64) PRIMARY KEY,
   status      text NOT NULL,     -- 'running' | 'complete' | 'failed'
   next_cursor text,
@@ -25,7 +25,7 @@ CREATE TABLE contact_import_runs (
 
 ```go
 err := tx.QueryRow(ctx, `
-    INSERT INTO contact_import_runs (account_id, status)
+    INSERT INTO contact_import_state (account_id, status)
     VALUES ($1, 'running')
     ON CONFLICT (account_id) DO UPDATE SET status = 'running'
     RETURNING next_cursor`, args.AccountId).Scan(&cursor)
@@ -37,7 +37,7 @@ The second invocation reads `next_cursor` and resumes; the work it re-does is ov
 
 When a worker claims a row, atlantis sets `claimed_until = now() + heartbeat_budget`. The SDK auto-heartbeats at one third of that budget; each heartbeat re-extends `claimed_until`. As long as heartbeats keep landing, the lease never expires. The SDK installs the heartbeat goroutine automatically — handlers don't touch it.
 
-The default budget is **5 minutes**. Most handlers complete inside that window and need no configuration.
+The default budget is **2 minutes**. Most handlers complete inside that window and need no configuration.
 
 Override per-job with the `heartbeat` modifier when a handler blocks on a single external call longer than the default — an upstream API page that takes 8 minutes, an ML training step that takes 20 minutes. Without the override the dispatcher will revoke and re-dispatch mid-call even though the worker is alive.
 
@@ -51,7 +51,7 @@ job ImportContacts in directory {
 }
 ```
 
-The override is symmetric: `heartbeat 30s` narrows the window so a dead worker is reclaimed in 30 seconds instead of 5 minutes. `heartbeat` is independent of `timeout` — `timeout` is the handler's wall-clock budget per attempt; `heartbeat` is the dispatcher's grace window before declaring the worker dead.
+The override is symmetric: `heartbeat 30s` narrows the window so a dead worker is reclaimed in 30 seconds instead of 2 minutes. `heartbeat` is independent of `timeout` — `timeout` is the handler's wall-clock budget per attempt; `heartbeat` is the dispatcher's grace window before declaring the worker dead.
 
 ## 3. Checkpointing progress
 

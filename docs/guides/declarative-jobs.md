@@ -67,6 +67,8 @@ func (h *importContactsHandler) Handle(ctx context.Context, args directory.Impor
 }
 ```
 
+`crmapi` here stands in for your upstream provider's Go client — substitute your own.
+
 ## 4. Register at server startup
 
 In `cmd/server/main.go` (or your fork's equivalent):
@@ -147,7 +149,7 @@ import (
     "time"
 
     "github.com/jackc/pgx/v5/pgxpool"
-    "github.com/rachitkumar205/atlantis-go/jobs"
+    "github.com/rachitkumar205/atlantis/clients/go/jobs"
     "gen/go/server/directory"
 )
 
