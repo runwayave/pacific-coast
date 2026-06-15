@@ -16,8 +16,10 @@ package introspect
 //     constraint row, so it survives the filter. This is exactly the class
 //     that silently rejects legitimate writes — a uniqueness the schema
 //     author never asked for and cannot see.
-//   - The DSL cannot express a unique secondary index at all, so any bare
-//     unique index on declared columns is, by construction, undeclared.
+//   - The DSL's only unique-index form is `unique index partial` (a partial
+//     unique index — Postgres UNIQUE constraints can't be partial). A bare
+//     unique index is therefore undeclared unless it's a partial one that a
+//     `unique index partial` declares with a matching predicate.
 //
 // The detector is read-only and reports; it never drops anything. The
 // apply path decides policy (refuse vs. ATLANTIS_ALLOW_INDEX_DRIFT override).
@@ -69,7 +71,7 @@ func (d UniqueIndexDrift) Describe() string {
 // the declared tables and returns the ones the schema doesn't account for,
 // plus advisory notes (e.g. expression indexes that couldn't be analyzed).
 // Read-only; safe to run against s.pool at plan time or inside the apply tx.
-func DetectUniqueIndexDrift(ctx context.Context, q Querier, declaredIR *dsl.IR) ([]UniqueIndexDrift, []string, error) {
+func DetectUniqueIndexDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR) ([]UniqueIndexDrift, []string, error) {
 	if declaredIR == nil {
 		return nil, nil, fmt.Errorf("introspect: declaredIR is required")
 	}
@@ -85,7 +87,22 @@ func DetectUniqueIndexDrift(ctx context.Context, q Querier, declaredIR *dsl.IR) 
 	if err != nil {
 		return nil, nil, err
 	}
-	drift := classifyUniqueIndexDrift(declared, live)
+
+	// Normalize a declared predicate through Postgres so it can be compared to
+	// the live pg_get_expr deparse on equal terms (see normalizePredicate).
+	entities := make(map[string]*dsl.Entity, len(declaredIR.Entities))
+	for i := range declaredIR.Entities {
+		e := &declaredIR.Entities[i]
+		entities[e.ID()] = e
+	}
+	normalize := func(entityID string, pred *dsl.PredExpr) (string, bool) {
+		e := entities[entityID]
+		if e == nil {
+			return "", false
+		}
+		return normalizePredicate(ctx, q, e, pred)
+	}
+	drift := classifyUniqueIndexDrift(declared, live, normalize)
 
 	var notes []string
 	if skippedExpr > 0 {
@@ -103,7 +120,7 @@ type declaredUnique struct {
 	entityID       string
 	fields         map[string]bool
 	uniqueSets     map[string]bool
-	partialUniques map[string][]*dsl.PartialPred // column-set key → declared partial predicates
+	partialUniques map[string][]*dsl.PredExpr // column-set key → declared partial predicates
 }
 
 func buildDeclaredUniques(ir *dsl.IR) map[physRef]declaredUnique {
@@ -115,7 +132,7 @@ func buildDeclaredUniques(ir *dsl.IR) map[physRef]declaredUnique {
 			entityID:       e.ID(),
 			fields:         make(map[string]bool, len(e.Fields)),
 			uniqueSets:     make(map[string]bool),
-			partialUniques: make(map[string][]*dsl.PartialPred),
+			partialUniques: make(map[string][]*dsl.PredExpr),
 		}
 		for _, f := range e.Fields {
 			du.fields[f.Name] = true
@@ -171,7 +188,7 @@ type liveUniqueIndex struct {
 // for a partial index via a matching `unique index partial` declaration. An
 // index touching any undeclared column is the operator's private business
 // and is left alone.
-func classifyUniqueIndexDrift(declared map[physRef]declaredUnique, live map[physRef][]liveUniqueIndex) []UniqueIndexDrift {
+func classifyUniqueIndexDrift(declared map[physRef]declaredUnique, live map[physRef][]liveUniqueIndex, normalize func(entityID string, pred *dsl.PredExpr) (string, bool)) []UniqueIndexDrift {
 	var out []UniqueIndexDrift
 	for ref, idxs := range live {
 		du, ok := declared[ref]
@@ -204,7 +221,10 @@ func classifyUniqueIndexDrift(declared map[physRef]declaredUnique, live map[phys
 			} else {
 				matched := false
 				for _, dp := range du.partialUniques[colKey] {
-					if predMatchesLive(dp, idx.predicate) {
+					// A declared predicate matches the live one iff Postgres
+					// normalizes both to the same predicate (up to commutative
+					// operand order; see normalizedEqual).
+					if norm, ok := normalize(du.entityID, dp); ok && normalizedEqual(norm, idx.predicate) {
 						matched = true
 						break
 					}

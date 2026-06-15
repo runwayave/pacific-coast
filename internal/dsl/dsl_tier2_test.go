@@ -105,11 +105,15 @@ func TestTier2_PartialPredicateComparison(t *testing.T) {
   index partial by id where status = "active"
 }`)
 	idx := ir.Entities[0].Indexes[0]
-	if idx.Where == nil || idx.Where.Op != "=" {
-		t.Fatalf("partial pred op missing: %+v", idx.Where)
+	w := idx.Where
+	if w == nil || w.Kind != PredKindCompare || w.Op != "=" {
+		t.Fatalf("partial pred op missing: %+v", w)
 	}
-	if idx.Where.Literal == nil || idx.Where.Literal.Str != "active" {
-		t.Errorf("partial pred literal wrong: %+v", idx.Where.Literal)
+	if w.Left == nil || w.Left.Kind != OperandColumn || w.Left.Name != "status" {
+		t.Errorf("partial pred lhs wrong: %+v", w.Left)
+	}
+	if w.Right == nil || w.Right.Literal == nil || w.Right.Literal.Str != "active" {
+		t.Errorf("partial pred literal wrong: %+v", w.Right)
 	}
 }
 

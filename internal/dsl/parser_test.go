@@ -229,10 +229,19 @@ entity P in x {
 	if idxs[2].Kind != IndexGIN || idxs[2].Field != "meta" {
 		t.Errorf("gin index shape: %+v", idxs[2])
 	}
-	if idxs[3].Kind != IndexPartial || idxs[3].Where == nil ||
-		idxs[3].Where.Field != "deleted_at" || !idxs[3].Where.IsNull {
+	if idxs[3].Kind != IndexPartial || !predIsNullOnCol(idxs[3].Where, "deleted_at") {
 		t.Errorf("partial index shape: %+v %+v", idxs[3], idxs[3].Where)
 	}
+}
+
+// predIsNullOnCol reports whether p is `<col> IS NULL` (the AST shape).
+func predIsNullOnCol(p Pred, col string) bool {
+	np, ok := p.(*PredNull)
+	if !ok || np.Negated {
+		return false
+	}
+	oc, ok := np.Operand.(*OpColumn)
+	return ok && oc.Name == col
 }
 
 func TestParse_UniquePartialIndex(t *testing.T) {
@@ -258,7 +267,7 @@ entity P in x {
 	if idx.Kind != IndexPartial || !idx.Unique {
 		t.Fatalf("want unique partial index, got Kind=%v Unique=%v", idx.Kind, idx.Unique)
 	}
-	if idx.Where == nil || idx.Where.Field != "deleted_at" || !idx.Where.IsNull {
+	if !predIsNullOnCol(idx.Where, "deleted_at") {
 		t.Errorf("predicate shape: %+v", idx.Where)
 	}
 

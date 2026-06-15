@@ -666,7 +666,7 @@ func (p *Parser) parseIndex() *IndexDecl {
 		p.expect(TokBy)
 		fields := p.parseIndexFields()
 		p.expect(TokWhere)
-		where := p.parsePartialPredicate()
+		where := p.parsePredicate()
 		return &IndexDecl{Pos: kw.Pos, Kind: IndexPartial, Fields: fields, Where: where}
 
 	default:
@@ -719,31 +719,240 @@ func (p *Parser) parseVecOps() VectorOps {
 	}
 }
 
-func (p *Parser) parsePartialPredicate() *PartialPredicate {
-	field := p.expect(TokIdent)
-	pp := &PartialPredicate{Pos: field.Pos, Field: field.Value}
-	// Two forms:
-	//   field is [not] null
-	//   field <op> <literal>
+// parsePredicate parses a partial-index `where` clause into a recursive Pred
+// tree. The grammar (precedence low→high):
+//
+//	Pred    := OrExpr
+//	OrExpr  := AndExpr ( "or"  AndExpr )*
+//	AndExpr := NotExpr ( "and" NotExpr )*
+//	NotExpr := "not" NotExpr | Primary
+//	Primary := "(" Pred ")"
+//	         | Operand ( cmp Operand | "is" ["not"] "null" | ["not"] "in" "(" list ")" | ε )
+//	Operand := String | Int | Float | "true" | "false" | Column
+//
+// `and`/`or` are matched as bare identifiers (Value-based), exactly as the
+// typed-step parser (parseExpr) does — they are deliberately *not* reserved
+// words so existing field names never break. The clause has no closing
+// delimiter, so the loops terminate naturally: AndExpr/OrExpr continue only on
+// the literal idents `and`/`or`, and a bare operand with no trailing
+// operator/keyword becomes a PredTruthy, leaving the next entity-member token
+// (index, soft_delete, `}`, …) for the member loop. The one ambiguity — a column
+// literally named `and`/`or` immediately after a bare boolean predicate — is the
+// accepted tradeoff already present in parseExpr.
+func (p *Parser) parsePredicate() Pred {
+	return p.parseOrExpr()
+}
+
+func (p *Parser) parseOrExpr() Pred {
+	left := p.parseAndExpr()
+	for p.peekIdentValue("or") {
+		p.advance()
+		left = combineBool("or", left, p.parseAndExpr())
+	}
+	return left
+}
+
+func (p *Parser) parseAndExpr() Pred {
+	left := p.parseNotExpr()
+	for p.peekIdentValue("and") {
+		p.advance()
+		left = combineBool("and", left, p.parseNotExpr())
+	}
+	return left
+}
+
+func (p *Parser) parseNotExpr() Pred {
+	if t := p.peek(); t.Kind == TokNot {
+		p.advance()
+		return &PredNot{Pos: t.Pos, Inner: p.parseNotExpr()}
+	}
+	return p.parsePrimary()
+}
+
+func (p *Parser) parsePrimary() Pred {
+	if t, ok := p.accept(TokLParen); ok {
+		inner := p.parsePredicate()
+		p.expect(TokRParen)
+		_ = t
+		return inner
+	}
+	left := p.parseOperand()
 	t := p.peek()
 	switch t.Kind {
+	case TokEquals, TokNotEq, TokLT, TokLE, TokGT, TokGE:
+		p.advance()
+		return &PredCompare{Pos: t.Pos, Op: t.Value, Left: left, Right: p.parseOperand()}
 	case TokIs:
 		p.advance()
-		if _, ok := p.accept(TokNot); ok {
-			p.expect(TokNull)
-			pp.IsNull = false
-		} else {
-			p.expect(TokNull)
-			pp.IsNull = true
-		}
-	case TokEquals, TokNotEq, TokLT, TokLE, TokGT, TokGE:
-		pp.Op = t.Value
+		_, negated := p.accept(TokNot)
+		p.expect(TokNull)
+		return &PredNull{Pos: t.Pos, Operand: left, Negated: negated}
+	case TokIn:
 		p.advance()
-		pp.Literal = p.parseDefaultValue(t.Pos)
+		return &PredIn{Pos: t.Pos, Operand: left, List: p.parseInList(), Negated: false}
+	case TokNot:
+		// `<operand> not in (...)` — boolean NOT is handled by parseNotExpr
+		// before any operand is read, so a `not` *after* an operand can only be
+		// `not in`.
+		p.advance()
+		p.expect(TokIn)
+		return &PredIn{Pos: t.Pos, Operand: left, List: p.parseInList(), Negated: true}
 	default:
-		p.errf(t.Pos, "expected 'is' or comparison operator, got %s", t.Kind)
+		// bare boolean operand, e.g. `where is_default`
+		return &PredTruthy{Pos: left.Position(), Operand: left}
 	}
-	return pp
+}
+
+func (p *Parser) parseInList() []Operand {
+	p.expect(TokLParen)
+	var list []Operand
+	for {
+		list = append(list, p.parseOperand())
+		if _, ok := p.accept(TokComma); !ok {
+			break
+		}
+	}
+	p.expect(TokRParen)
+	return list
+}
+
+// parseOperand parses a scalar operand and any trailing `::type` casts.
+func (p *Parser) parseOperand() Operand {
+	op := p.parseBaseOperand()
+	for p.peek().Kind == TokDColon {
+		pos := p.advance().Pos
+		op = &OpCast{Pos: pos, Inner: op, Type: p.parseCastType()}
+	}
+	return op
+}
+
+func (p *Parser) parseBaseOperand() Operand {
+	t := p.peek()
+	switch t.Kind {
+	case TokString:
+		p.advance()
+		return &OpLiteral{Pos: t.Pos, Kind: LitString, Str: t.Value}
+	case TokInt:
+		p.advance()
+		n, _ := strconv.ParseInt(t.Value, 10, 64)
+		return &OpLiteral{Pos: t.Pos, Kind: LitInt, Int: n}
+	case TokFloat:
+		p.advance()
+		f, _ := strconv.ParseFloat(t.Value, 64)
+		return &OpLiteral{Pos: t.Pos, Kind: LitFloat, Float: f}
+	case TokTrue:
+		p.advance()
+		return &OpLiteral{Pos: t.Pos, Kind: LitBool, Bool: true}
+	case TokFalse:
+		p.advance()
+		return &OpLiteral{Pos: t.Pos, Kind: LitBool, Bool: false}
+	case TokIdent:
+		// `case when ...` is a CASE expression. The `when` lookahead keeps a
+		// column literally named `case` usable everywhere else.
+		if t.Value == "case" && p.pos+1 < len(p.toks) &&
+			p.toks[p.pos+1].Kind == TokIdent && p.toks[p.pos+1].Value == "when" {
+			return p.parseCase(t.Pos)
+		}
+		p.advance()
+		// `ident(` is an immutable function call; a bare ident is a column.
+		if p.peek().Kind == TokLParen {
+			return &OpFunc{Pos: t.Pos, Name: t.Value, Args: p.parseFuncArgs()}
+		}
+		return &OpColumn{Pos: t.Pos, Name: t.Value}
+	default:
+		p.errf(t.Pos, "expected a column, literal, or function in predicate, got %s", t.Kind)
+		p.advance()
+		return &OpColumn{Pos: t.Pos, Name: ""}
+	}
+}
+
+// parseCase parses `case when <pred> then <operand> ... [else <operand>] end`.
+// case/when/then/else/end are contextual keywords (bare idents), recognised only
+// here, so they remain usable as field names elsewhere.
+func (p *Parser) parseCase(pos Position) Operand {
+	p.advance() // "case"
+	oc := &OpCase{Pos: pos}
+	for p.peekIdentValue("when") {
+		p.advance() // "when"
+		cond := p.parsePredicate()
+		p.expectIdentValue("then")
+		oc.Whens = append(oc.Whens, CaseWhen{Cond: cond, Then: p.parseOperand()})
+	}
+	if p.peekIdentValue("else") {
+		p.advance()
+		oc.Else = p.parseOperand()
+	}
+	p.expectIdentValue("end")
+	return oc
+}
+
+// expectIdentValue consumes a bare identifier with the given value or records an
+// error.
+func (p *Parser) expectIdentValue(v string) {
+	if t := p.peek(); t.Kind == TokIdent && t.Value == v {
+		p.advance()
+		return
+	}
+	t := p.peek()
+	p.errf(t.Pos, "expected %q, got %s", v, t.Kind)
+}
+
+func (p *Parser) parseFuncArgs() []Operand {
+	p.expect(TokLParen)
+	var args []Operand
+	if p.peek().Kind == TokRParen {
+		p.advance()
+		return args
+	}
+	for {
+		args = append(args, p.parseOperand())
+		if _, ok := p.accept(TokComma); !ok {
+			break
+		}
+	}
+	p.expect(TokRParen)
+	return args
+}
+
+// parseCastType reads a type name after `::` — an identifier with an optional
+// length/precision list, e.g. `text`, `numeric`, `varchar(20)`, `numeric(10, 2)`.
+func (p *Parser) parseCastType() string {
+	name := p.expect(TokIdent)
+	typ := name.Value
+	if _, ok := p.accept(TokLParen); ok {
+		typ += "("
+		for i := 0; ; i++ {
+			n := p.expect(TokInt)
+			if i > 0 {
+				typ += ", "
+			}
+			typ += n.Value
+			if _, ok := p.accept(TokComma); !ok {
+				break
+			}
+		}
+		typ += ")"
+		p.expect(TokRParen)
+	}
+	return typ
+}
+
+// peekIdentValue reports whether the next token is a bare identifier with the
+// given value — used for the contextual `and`/`or` keywords.
+func (p *Parser) peekIdentValue(v string) bool {
+	t := p.peek()
+	return t.Kind == TokIdent && t.Value == v
+}
+
+// combineBool left-associatively folds `and`/`or`, flattening a same-operator
+// left child so `a and b and c` is a single n-ary PredBool. Flattening here is
+// what makes the matcher's commutative multiset comparison associativity-correct.
+func combineBool(op string, left, right Pred) Pred {
+	if b, ok := left.(*PredBool); ok && b.Op == op {
+		b.Operands = append(b.Operands, right)
+		return b
+	}
+	return &PredBool{Pos: left.Position(), Op: op, Operands: []Pred{left, right}}
 }
 
 // ---- cache ----

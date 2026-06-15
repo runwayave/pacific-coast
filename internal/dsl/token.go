@@ -13,6 +13,7 @@ const (
 	// Literals and identifiers
 	TokIdent
 	TokInt
+	TokFloat // 3.14 — a digit run, a dot, then at least one more digit
 	TokString
 	TokDuration // 30s, 10m, 1h, 7d
 
@@ -25,6 +26,7 @@ const (
 	TokRBracket // ]
 	TokComma    // ,
 	TokColon    // :
+	TokDColon   // :: (cast operator)
 	TokEquals   // =
 	TokNotEq    // !=
 	TokLT       // <
@@ -154,6 +156,7 @@ var tokenNames = map[TokenKind]string{
 	TokEOF:            "EOF",
 	TokIdent:          "IDENT",
 	TokInt:            "INT",
+	TokFloat:          "FLOAT",
 	TokString:         "STRING",
 	TokDuration:       "DURATION",
 	TokLBrace:         "{",
@@ -164,6 +167,7 @@ var tokenNames = map[TokenKind]string{
 	TokRBracket:       "]",
 	TokComma:          ",",
 	TokColon:          ":",
+	TokDColon:         "::",
 	TokEquals:         "=",
 	TokNotEq:          "!=",
 	TokLT:             "<",

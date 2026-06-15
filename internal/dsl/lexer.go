@@ -120,6 +120,10 @@ func (l *Lexer) next() Token {
 		return Token{Kind: TokComma, Value: ",", Pos: start}
 	case r == ':':
 		l.advance(size)
+		if l.pos < len(l.src) && l.src[l.pos] == ':' {
+			l.advance(1)
+			return Token{Kind: TokDColon, Value: "::", Pos: start}
+		}
 		return Token{Kind: TokColon, Value: ":", Pos: start}
 	case r == '=':
 		l.advance(size)
@@ -260,6 +264,19 @@ func (l *Lexer) scanIntOrDuration(start Position) Token {
 		l.advance(1)
 	}
 	digits := string(l.src[digitStart:l.pos])
+
+	// Float: a single `.` followed by at least one digit promotes the run to a
+	// float (`3.14`). A `.` *not* followed by a digit stays a separate TokDot
+	// (qualified refs like `vendor.Product` are unaffected — `Product` isn't a
+	// digit). Index-predicate literals are the only place floats appear today.
+	if l.pos+1 < len(l.src) && l.src[l.pos] == '.' && isDigit(rune(l.src[l.pos+1])) {
+		l.advance(1) // consume '.'
+		fracStart := l.pos
+		for l.pos < len(l.src) && isDigit(rune(l.src[l.pos])) {
+			l.advance(1)
+		}
+		return Token{Kind: TokFloat, Value: digits + "." + string(l.src[fracStart:l.pos]), Pos: start}
+	}
 
 	// Optional duration suffix: s / m / h / d
 	if l.pos < len(l.src) {

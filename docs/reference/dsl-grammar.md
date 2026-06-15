@@ -46,12 +46,34 @@ IndexField     = ( Ident | "expr" StringLiteral ) [ "asc" | "desc" ]
 
 VectorOps      = "cosine" | "l2" | "ip"
 
-PartialPredicate =
-    Ident "is" [ "not" ] "null"
-  | Ident PartialOp Literal
+PartialPredicate = OrExpr
+OrExpr   = AndExpr { "or"  AndExpr }
+AndExpr  = NotExpr { "and" NotExpr }
+NotExpr  = "not" NotExpr | Primary
+Primary  =
+    "(" PartialPredicate ")"
+  | Operand PartialOp Operand
+  | Operand "is" [ "not" ] "null"
+  | Operand [ "not" ] "in" "(" Operand { "," Operand } ")"
+  | Operand                              // bare boolean column
+
+Operand  = Base { "::" Type }
+Base     = StringLiteral | NumericLiteral | BooleanLiteral
+         | Ident                                       // column
+         | Ident "(" [ Operand { "," Operand } ] ")"   // immutable function call
+         | Case
+Case     = "case" { "when" PartialPredicate "then" Operand } [ "else" Operand ] "end"
+Type     = Ident [ "(" Integer { "," Integer } ")" ]
 
 PartialOp = "=" | "!=" | "<" | "<=" | ">" | ">="
 ```
+
+`and` binds tighter than `or`; parenthesise to override. `and`/`or` (and the CASE
+keywords `case`/`when`/`then`/`else`/`end`) are not reserved words — a field may
+still be named `and`, `case`, etc. everywhere except where it would start one of
+those constructs. `NumericLiteral` covers both integers and floats (`3`, `3.14`).
+Operands may be columns, literals, immutable function calls (`lower(email)`),
+casts (`amount::numeric`), and CASE expressions.
 
 Entity names use `PascalIdent`; namespaces use `SnakeIdent`. Underscores are syntactically valid in namespaces but not conventional.
 
@@ -128,8 +150,8 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 - `composite_pk by f1, f2` — composite primary key. Member fields must each be `not null`. Mutually exclusive with per-field `primary`.
 - `unique by f1, f2` — multi-column unique constraint. May appear multiple times. For a single column, use the per-field `unique` modifier instead.
 - `index by f1, f2` — non-unique B-tree index. May appear multiple times. Each field may instead be an expression (`expr "lower(email)"`) and may carry a per-field `asc` or `desc` (e.g. `index by created_at desc`).
-- `index partial by f1, f2 where <predicate>` — partial index. The predicate is restricted, not arbitrary SQL: either `field is [not] null`, or `field <op> <literal>` with `<op>` one of `=`, `!=`, `<`, `<=`, `>`, `>=` (inequality is written `!=`).
-- `unique index partial by f1, f2 where <predicate>` — partial **unique** index (`CREATE UNIQUE INDEX … WHERE …`). The only unique-index form. Use it for uniqueness scoped by a predicate — e.g. `unique index partial by sku where deleted_at is null` makes `sku` unique among non-soft-deleted rows. A Postgres UNIQUE *constraint* can't be partial, so `unique` / `unique by` can't express this. Same restricted predicate grammar as `index partial`.
+- `index partial by f1, f2 where <predicate>` — partial index. The predicate is a boolean expression over the entity's columns and constants: `and` / `or` / `not` / parentheses combining comparisons (`=`, `!=`, `<`, `<=`, `>`, `>=`; inequality is written `!=`), `field is [not] null`, `field [not] in (...)`, and bare boolean columns (`where is_default`). Operands may be columns, literals, immutable function calls (`lower(email)`), casts (`amount::numeric`), and `case … end` expressions. It must be a *legal Postgres index predicate* — no subqueries or aggregates; a volatile function (`now()`, `random()`) is rejected by Postgres at apply time.
+- `unique index partial by f1, f2 where <predicate>` — partial **unique** index (`CREATE UNIQUE INDEX … WHERE …`). Use it for uniqueness scoped by a predicate — e.g. `unique index partial by sku where deleted_at is null` makes `sku` unique among non-soft-deleted rows, or `unique index partial by user_id where is_default` for one default per user. A Postgres UNIQUE *constraint* can't be partial, so `unique` / `unique by` can't express this. Same predicate grammar as `index partial`.
 - `index hnsw on <field> ops <cosine|l2|ip>` — pgvector HNSW index over a `vector(N)` field. `ops` picks the operator class: `cosine`, `l2` (Euclidean), or `ip` (inner product).
 - `index gin on <field>` — GIN index, for `jsonb` and array fields.
 

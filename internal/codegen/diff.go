@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/predsql"
 )
 
 // ChangeClass selects how a change must be applied.
@@ -1024,31 +1025,11 @@ func indexKey(idx dsl.Index) string {
 				s += " desc"
 			}
 		}
-		if idx.Where != nil {
-			s += "|" + idx.Where.Field
-			switch {
-			case idx.Where.Op == "" && idx.Where.IsNull:
-				s += " is null"
-			case idx.Where.Op == "":
-				s += " is not null"
-			default:
-				s += " " + idx.Where.Op
-				if idx.Where.Literal != nil {
-					switch idx.Where.Literal.Kind {
-					case dsl.DefaultIRString:
-						s += " s:" + idx.Where.Literal.Str
-					case dsl.DefaultIRInt:
-						s += fmt.Sprintf(" i:%d", idx.Where.Literal.Int)
-					case dsl.DefaultIRBool:
-						s += fmt.Sprintf(" b:%v", idx.Where.Literal.Bool)
-					case dsl.DefaultIRNow:
-						s += " now()"
-					case dsl.DefaultIRRaw:
-						s += " raw:" + idx.Where.Literal.Str
-					}
-				}
-			}
-		}
+		// The predicate portion (prefixed `|`) is byte-identical to the
+		// pre-tree encoding for the two legacy shapes, so already-applied
+		// partial indexes never re-diff as drop+recreate; compound predicates
+		// get a deterministic, commutativity-stable structural key.
+		s += predsql.CanonicalKey(idx.Where)
 		return s
 	case dsl.IndexHNSW:
 		return fmt.Sprintf("hnsw:%s:%s", idx.Field, idx.VecOps)

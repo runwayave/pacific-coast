@@ -291,7 +291,7 @@ type IndexDecl struct {
 	Fields []IndexField
 
 	// For partial:
-	Where *PartialPredicate
+	Where Pred
 
 	// For hnsw / gin:
 	Field  string
@@ -345,22 +345,166 @@ func (v VectorOps) String() string {
 	return ""
 }
 
-// PartialPredicate represents the `where ...` clause on a partial index.
-// Two forms today:
+// Pred is the `where ...` clause on a partial index — a recursive boolean
+// expression over the entity's own columns and constants. It models the full
+// surface of a *legal Postgres index predicate*: boolean structure, the six
+// comparisons, IS [NOT] NULL, [NOT] IN, and a bare boolean operand. (Function
+// calls, casts, and CASE operands land in later phases.) The tree is the only
+// representation downstream consumers see; the SQL emitter (internal/dsl/predsql)
+// renders it and the drift matcher compares it against the live predicate.
 //
-//	field is [not] null     → Op == "", IsNull is true/false
-//	field <op> <literal>    → Op in {"=","!=","<","<=",">",">="}, Literal set
-//
-// Both forms map to predicates Postgres accepts; the SQL emitter passes
-// through verbatim (with quoting on string literals).
-type PartialPredicate struct {
-	Pos    Position
-	Field  string
-	IsNull bool // when Op == "": true → IS NULL, false → IS NOT NULL
-
-	Op      string       // "" for null tests; otherwise "=", "!=", "<", "<=", ">", ">="
-	Literal DefaultValue // rhs of the comparison; only meaningful when Op != ""
+// Two shapes — a single `PredNull{OpColumn}` and a single
+// `PredCompare{OpColumn, OpLiteral}` — are the predicates the DSL could express
+// before this grammar existed. They must round-trip byte-identically through the
+// IR JSON and the diff key so already-applied indexes never re-diff; see
+// ir.go's PredExpr marshaling and predsql.CanonicalKey.
+type Pred interface {
+	isPred()
+	Position() Position
 }
+
+// PredBool is an n-ary `and`/`or`. Nested same-operator nodes are flattened at
+// parse time so `a and b and c` is one PredBool with three operands — this makes
+// the matcher's commutative multiset comparison associativity-correct for free.
+type PredBool struct {
+	Pos      Position
+	Op       string // "and" | "or"
+	Operands []Pred
+}
+
+// PredNot is boolean negation. Kept structurally distinct from `IS NOT NULL` and
+// `NOT IN`, which carry their own negation flags — the matcher only treats
+// `NOT (x IS NULL)` ≡ `x IS NOT NULL` and double-NOT as equivalent, nothing else.
+type PredNot struct {
+	Pos   Position
+	Inner Pred
+}
+
+// PredCompare is `<operand> <op> <operand>` with op in =,!=,<,<=,>,>=.
+type PredCompare struct {
+	Pos   Position
+	Op    string
+	Left  Operand
+	Right Operand
+}
+
+// PredNull is `<operand> IS [NOT] NULL`. Negated == true is IS NOT NULL.
+type PredNull struct {
+	Pos     Position
+	Operand Operand
+	Negated bool
+}
+
+// PredIn is `<operand> [NOT] IN (<operand>, ...)`. The list is order-independent
+// for matching (Postgres deparses it as `= ANY(ARRAY[...])`).
+type PredIn struct {
+	Pos     Position
+	Operand Operand
+	List    []Operand
+	Negated bool
+}
+
+// PredTruthy is a bare boolean operand used directly as a predicate
+// (`where is_default`). Postgres deparses it as `(is_default = true)`; the
+// matcher folds the two forms together.
+type PredTruthy struct {
+	Pos     Position
+	Operand Operand
+}
+
+func (*PredBool) isPred()    {}
+func (*PredNot) isPred()     {}
+func (*PredCompare) isPred() {}
+func (*PredNull) isPred()    {}
+func (*PredIn) isPred()      {}
+func (*PredTruthy) isPred()  {}
+
+func (p *PredBool) Position() Position    { return p.Pos }
+func (p *PredNot) Position() Position     { return p.Pos }
+func (p *PredCompare) Position() Position { return p.Pos }
+func (p *PredNull) Position() Position    { return p.Pos }
+func (p *PredIn) Position() Position      { return p.Pos }
+func (p *PredTruthy) Position() Position  { return p.Pos }
+
+// Operand is a scalar inside a predicate: a column reference or a literal.
+// (Function calls, casts, and CASE expressions extend this interface in later
+// phases.)
+type Operand interface {
+	isOperand()
+	Position() Position
+}
+
+// OpColumn is a bare column reference. Validated against the entity's fields at
+// IR lowering.
+type OpColumn struct {
+	Pos  Position
+	Name string
+}
+
+// LiteralKind enumerates the scalar literal forms a predicate operand can take.
+type LiteralKind int
+
+const (
+	LitString LiteralKind = iota
+	LitInt
+	LitFloat
+	LitBool
+)
+
+// OpLiteral is a string / int / float / bool constant. Distinct from
+// DefaultValue (which also carries now()/raw and has no float) because predicate
+// literals are a smaller, different surface.
+type OpLiteral struct {
+	Pos   Position
+	Kind  LiteralKind
+	Str   string
+	Int   int64
+	Float float64
+	Bool  bool
+}
+
+// OpFunc is an immutable function call, e.g. `lower(email)` or `coalesce(x, 0)`.
+// Volatility is not checked here — Postgres rejects a volatile function in an
+// index predicate at apply time.
+type OpFunc struct {
+	Pos  Position
+	Name string
+	Args []Operand
+}
+
+// OpCast is a `<operand>::<type>` cast. Type holds the rendered type text
+// (`text`, `numeric`, `varchar(20)`).
+type OpCast struct {
+	Pos   Position
+	Inner Operand
+	Type  string
+}
+
+// CaseWhen is one `when <predicate> then <operand>` arm of a CASE.
+type CaseWhen struct {
+	Cond Pred
+	Then Operand
+}
+
+// OpCase is a searched `CASE WHEN ... THEN ... [ELSE ...] END` expression used
+// as an operand. Arms are order-significant.
+type OpCase struct {
+	Pos   Position
+	Whens []CaseWhen
+	Else  Operand // nil if no ELSE
+}
+
+func (*OpColumn) isOperand()  {}
+func (*OpLiteral) isOperand() {}
+func (*OpFunc) isOperand()    {}
+func (*OpCast) isOperand()    {}
+func (*OpCase) isOperand()    {}
+
+func (o *OpColumn) Position() Position  { return o.Pos }
+func (o *OpLiteral) Position() Position { return o.Pos }
+func (o *OpFunc) Position() Position    { return o.Pos }
+func (o *OpCast) Position() Position    { return o.Pos }
+func (o *OpCase) Position() Position    { return o.Pos }
 
 // CacheBlock holds the cache { ... } stanza.
 type CacheBlock struct {

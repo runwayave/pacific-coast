@@ -1,48 +1,59 @@
 package introspect
 
-import (
-	"testing"
+import "github.com/rachitkumar205/atlantis/internal/dsl"
 
-	"github.com/rachitkumar205/atlantis/internal/dsl"
-)
+// Predicate builders shared by the drift tests. The drift matcher itself is now
+// the DB normalizer (normalize.go), verified end-to-end against a live Postgres
+// in drift_live_test.go; the pure-Go unit tests inject a fake normalizer.
 
-func TestPredMatchesLive(t *testing.T) {
-	isNull := func(field string, isNull bool) *dsl.PartialPred {
-		return &dsl.PartialPred{Field: field, IsNull: isNull}
-	}
-	cmp := func(field, op string, lit *dsl.Default) *dsl.PartialPred {
-		return &dsl.PartialPred{Field: field, Op: op, Literal: lit}
-	}
-	str := func(s string) *dsl.Default { return &dsl.Default{Kind: dsl.DefaultIRString, Str: s} }
-	num := func(i int64) *dsl.Default { return &dsl.Default{Kind: dsl.DefaultIRInt, Int: i} }
+func col(name string) *dsl.PredOperand {
+	return &dsl.PredOperand{Kind: dsl.OperandColumn, Name: name}
+}
+func litS(s string) *dsl.PredOperand {
+	return &dsl.PredOperand{Kind: dsl.OperandLiteral, Literal: &dsl.Default{Kind: dsl.DefaultIRString, Str: s}}
+}
+func litI(i int64) *dsl.PredOperand {
+	return &dsl.PredOperand{Kind: dsl.OperandLiteral, Literal: &dsl.Default{Kind: dsl.DefaultIRInt, Int: i}}
+}
 
-	cases := []struct {
-		name     string
-		declared *dsl.PartialPred
-		live     string
-		want     bool
-	}{
-		{"is null", isNull("deleted_at", true), "(deleted_at IS NULL)", true},
-		{"is not null", isNull("deleted_at", false), "(deleted_at IS NOT NULL)", true},
-		{"string eq, text cast", cmp("status", "=", str("active")), "(status = 'active'::text)", true},
-		{"string eq, varchar cast (space in type)", cmp("status", "=", str("active")), "(status = 'active'::character varying)", true},
-		{"int gt", cmp("tier", ">", num(3)), "(tier > 3)", true},
-		{"!= normalizes to <>", cmp("status", "!=", str("x")), "(status <> 'x'::text)", true},
-		{"quoted reserved identifier", cmp("order", "=", num(1)), `("order" = 1)`, true},
+func nullPred(name string, negated bool) *dsl.PredExpr {
+	return &dsl.PredExpr{Kind: dsl.PredKindNull, Arg: col(name), Negated: negated}
+}
+func cmpPred(op string, l, r *dsl.PredOperand) *dsl.PredExpr {
+	return &dsl.PredExpr{Kind: dsl.PredKindCompare, Op: op, Left: l, Right: r}
+}
+func boolPred(op string, ops ...*dsl.PredExpr) *dsl.PredExpr {
+	return &dsl.PredExpr{Kind: dsl.PredKindBool, Op: op, Operands: ops}
+}
+func truthyPred(name string) *dsl.PredExpr {
+	return &dsl.PredExpr{Kind: dsl.PredKindTruthy, Arg: col(name)}
+}
+func inPred(name string, negated bool, items ...*dsl.PredOperand) *dsl.PredExpr {
+	return &dsl.PredExpr{Kind: dsl.PredKindIn, Arg: col(name), List: items, Negated: negated}
+}
+func funcOp(name string, args ...*dsl.PredOperand) *dsl.PredOperand {
+	return &dsl.PredOperand{Kind: dsl.OperandFunc, FuncName: name, Args: args}
+}
+func castOp(inner *dsl.PredOperand, typ string) *dsl.PredOperand {
+	return &dsl.PredOperand{Kind: dsl.OperandCast, Inner: inner, CastType: typ}
+}
+func caseOp(els *dsl.PredOperand, whens ...dsl.PredCaseWhen) *dsl.PredOperand {
+	return &dsl.PredOperand{Kind: dsl.OperandCase, Whens: whens, Else: els}
+}
+func when(cond *dsl.PredExpr, then *dsl.PredOperand) dsl.PredCaseWhen {
+	return dsl.PredCaseWhen{Cond: cond, Then: then}
+}
 
-		{"null-ness mismatch", isNull("deleted_at", true), "(deleted_at IS NOT NULL)", false},
-		{"int value mismatch", cmp("tier", ">", num(3)), "(tier > 4)", false},
-		{"string value mismatch", cmp("status", "=", str("active")), "(status = 'inactive'::text)", false},
-		{"operator mismatch", cmp("tier", ">", num(3)), "(tier >= 3)", false},
-		{"field mismatch", isNull("deleted_at", true), "(removed_at IS NULL)", false},
-		{"compound not matched (safe)", isNull("deleted_at", true), "(deleted_at IS NULL AND tier > 3)", false},
-		{"unparseable (safe)", isNull("deleted_at", true), "garbage ((", false},
+// fakeNormalize stands in for the Postgres normalizer in pure-Go drift tests:
+// it deparses the simple null shapes the way pg_get_expr would, so the classify
+// logic can be exercised without a database. Real deparse fidelity is covered by
+// drift_live_test.go.
+func fakeNormalize(_ string, p *dsl.PredExpr) (string, bool) {
+	if p.Kind == dsl.PredKindNull && p.Arg != nil && p.Arg.Kind == dsl.OperandColumn {
+		if p.Negated {
+			return "(" + p.Arg.Name + " IS NOT NULL)", true
+		}
+		return "(" + p.Arg.Name + " IS NULL)", true
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := predMatchesLive(tc.declared, tc.live); got != tc.want {
-				t.Errorf("predMatchesLive = %v, want %v (declared %+v, live %q)", got, tc.want, tc.declared, tc.live)
-			}
-		})
-	}
+	return "", false
 }

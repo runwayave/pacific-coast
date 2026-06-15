@@ -471,12 +471,16 @@ type FieldType struct {
 	HasNumP bool       `json:"has_num_p,omitempty"`
 }
 
-// Default captures a column DEFAULT expression. Exactly one of Str/Int/Bool/Now is meaningful.
+// Default captures a column DEFAULT expression, and is reused as the literal
+// operand inside a partial-index predicate. Exactly one of Str/Int/Float/Bool is
+// meaningful (Now/Raw carry no scalar). Float was added for predicate literals;
+// it is omitempty so the legacy string/int/bool literal JSON is unchanged.
 type Default struct {
-	Kind DefaultIRKind `json:"kind"`
-	Str  string        `json:"str,omitempty"`
-	Int  int64         `json:"int,omitempty"`
-	Bool bool          `json:"bool,omitempty"`
+	Kind  DefaultIRKind `json:"kind"`
+	Str   string        `json:"str,omitempty"`
+	Int   int64         `json:"int,omitempty"`
+	Float float64       `json:"float,omitempty"`
+	Bool  bool          `json:"bool,omitempty"`
 }
 
 // DefaultIRKind enumerates the variants a resolved Default can take.
@@ -485,6 +489,7 @@ type DefaultIRKind string
 const (
 	DefaultIRString DefaultIRKind = "string"
 	DefaultIRInt    DefaultIRKind = "int"
+	DefaultIRFloat  DefaultIRKind = "float"
 	DefaultIRBool   DefaultIRKind = "bool"
 	DefaultIRNow    DefaultIRKind = "now"
 	DefaultIRRaw    DefaultIRKind = "raw" // verbatim SQL expression in Str
@@ -535,21 +540,241 @@ type Index struct {
 	Fields []IndexField `json:"fields,omitempty"` // btree, partial
 	Field  string       `json:"field,omitempty"`  // hnsw, gin
 	VecOps VectorOps    `json:"vec_ops,omitempty"`
-	Where  *PartialPred `json:"where,omitempty"`  // partial only
+	Where  *PredExpr    `json:"where,omitempty"`  // partial only
 	Unique bool         `json:"unique,omitempty"` // partial only — CREATE UNIQUE INDEX
 }
 
-// PartialPred is the resolved form of a partial-index predicate.
+// PredKind tags a node of a resolved partial-index predicate tree.
+type PredKind string
+
+const (
+	PredKindBool    PredKind = "bool"    // n-ary and/or
+	PredKindNot     PredKind = "not"     // boolean negation
+	PredKindCompare PredKind = "compare" // <operand> <op> <operand>
+	PredKindNull    PredKind = "null"    // <operand> IS [NOT] NULL
+	PredKindIn      PredKind = "in"      // <operand> [NOT] IN (<operand>...)
+	PredKindTruthy  PredKind = "truthy"  // bare boolean operand
+)
+
+// PredExpr is the resolved (IR) form of a partial-index predicate — a recursive
+// boolean expression tree. It is the JSON-persisted shape stored in
+// ir_checkpoint, so its serialization is a compatibility contract:
 //
-// Two forms:
+//   - A tree that is exactly one legacy shape — `PredKindNull` over a column, or
+//     `PredKindCompare` of a column against a string/int/bool literal with one of
+//     the six legacy operators — marshals to the OLD flat JSON
+//     (`{"field","is_null","op","literal"}`) byte-for-byte, and unmarshals from
+//     it. This keeps every already-applied index's checkpoint hash unchanged, so
+//     adding this grammar produces no spurious "IR changed" / drop+recreate.
+//   - Any compound / float / IN / truthy / negated tree marshals to the tagged
+//     form below. Such a node only exists after an apply by a server that already
+//     understands it, so an older server never has to read one.
 //
-//	IS [NOT] NULL test: Op == "", IsNull bool.
-//	Comparison:         Op in {"=","!=","<","<=",">",">="}, Literal set.
-type PartialPred struct {
+// See MarshalJSON/UnmarshalJSON for the exact rules.
+type PredExpr struct {
+	Kind     PredKind       `json:"kind"`
+	Op       string         `json:"op,omitempty"`       // bool: and|or ; compare: =,!=,<,<=,>,>=
+	Operands []*PredExpr    `json:"operands,omitempty"` // bool
+	Inner    *PredExpr      `json:"inner,omitempty"`    // not
+	Left     *PredOperand   `json:"left,omitempty"`     // compare
+	Right    *PredOperand   `json:"right,omitempty"`    // compare
+	Arg      *PredOperand   `json:"arg,omitempty"`      // null, in, truthy
+	List     []*PredOperand `json:"list,omitempty"`     // in
+	Negated  bool           `json:"negated,omitempty"`  // null (IS NOT NULL), in (NOT IN)
+}
+
+// PredOperandKind tags a scalar operand inside a predicate.
+type PredOperandKind string
+
+const (
+	OperandColumn  PredOperandKind = "column"
+	OperandLiteral PredOperandKind = "literal"
+	OperandFunc    PredOperandKind = "func"
+	OperandCast    PredOperandKind = "cast"
+	OperandCase    PredOperandKind = "case"
+)
+
+// PredCaseWhen is one resolved arm of a CASE operand.
+type PredCaseWhen struct {
+	Cond *PredExpr    `json:"cond"`
+	Then *PredOperand `json:"then"`
+}
+
+// PredOperand is a scalar inside a predicate: a column, literal, immutable
+// function call, cast, or CASE expression.
+type PredOperand struct {
+	Kind     PredOperandKind `json:"kind"`
+	Name     string          `json:"name,omitempty"`      // column
+	Literal  *Default        `json:"literal,omitempty"`   // literal
+	FuncName string          `json:"func_name,omitempty"` // func
+	Args     []*PredOperand  `json:"args,omitempty"`      // func
+	Inner    *PredOperand    `json:"inner,omitempty"`     // cast
+	CastType string          `json:"cast_type,omitempty"` // cast
+	Whens    []PredCaseWhen  `json:"whens,omitempty"`     // case
+	Else     *PredOperand    `json:"else,omitempty"`      // case (nil if no ELSE)
+}
+
+// legacyPred is the flat JSON of the two pre-tree predicate shapes. Used only by
+// PredExpr's Marshal/UnmarshalJSON to read and write the compatibility form.
+type legacyPred struct {
 	Field   string   `json:"field"`
 	IsNull  bool     `json:"is_null,omitempty"`
 	Op      string   `json:"op,omitempty"`
 	Literal *Default `json:"literal,omitempty"`
+}
+
+// predExprAlias avoids infinite recursion in (Un)MarshalJSON.
+type predExprAlias PredExpr
+
+// legacyComparisonOps are the six operators the flat form could carry.
+func isLegacyCompareOp(op string) bool {
+	switch op {
+	case "=", "!=", "<", "<=", ">", ">=":
+		return true
+	}
+	return false
+}
+
+// asLegacy returns the flat form of p when p is exactly one of the two legacy
+// shapes, and ok=false otherwise.
+func (p *PredExpr) asLegacy() (legacyPred, bool) {
+	switch p.Kind {
+	case PredKindNull:
+		if p.Arg != nil && p.Arg.Kind == OperandColumn {
+			// legacy IsNull: true => IS NULL, false => IS NOT NULL.
+			return legacyPred{Field: p.Arg.Name, IsNull: !p.Negated}, true
+		}
+	case PredKindCompare:
+		if p.Left != nil && p.Left.Kind == OperandColumn &&
+			p.Right != nil && p.Right.Kind == OperandLiteral &&
+			isLegacyCompareOp(p.Op) && isLegacyLiteral(p.Right.Literal) {
+			return legacyPred{Field: p.Left.Name, Op: p.Op, Literal: p.Right.Literal}, true
+		}
+	}
+	return legacyPred{}, false
+}
+
+// LegacyForm exposes the two pre-tree shapes to other packages (the diff-key
+// and cache-suffix encoders) so "what counts as a legacy predicate" lives in one
+// place. ok is false for any compound / float / IN / truthy / negated tree.
+func (p *PredExpr) LegacyForm() (field, op string, isNull bool, lit *Default, ok bool) {
+	lg, k := p.asLegacy()
+	return lg.Field, lg.Op, lg.IsNull, lg.Literal, k
+}
+
+// isLegacyLiteral reports whether a literal is one a pre-tree server could have
+// produced (string/int/bool). A float literal forces the tagged form.
+func isLegacyLiteral(d *Default) bool {
+	if d == nil {
+		return false
+	}
+	switch d.Kind {
+	case DefaultIRString, DefaultIRInt, DefaultIRBool:
+		return true
+	}
+	return false
+}
+
+// MarshalJSON writes the legacy flat shape for the two pre-tree predicates and
+// the tagged shape for everything else. See the type doc for why.
+func (p *PredExpr) MarshalJSON() ([]byte, error) {
+	if lg, ok := p.asLegacy(); ok {
+		return json.Marshal(lg)
+	}
+	return json.Marshal((*predExprAlias)(p))
+}
+
+// UnmarshalJSON accepts both shapes: a tagged tree (has "kind") or the legacy
+// flat form (has "field", no "kind").
+func (p *PredExpr) UnmarshalJSON(b []byte) error {
+	var probe struct {
+		Kind  *string `json:"kind"`
+		Field *string `json:"field"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return err
+	}
+	if probe.Kind != nil {
+		var a predExprAlias
+		if err := json.Unmarshal(b, &a); err != nil {
+			return err
+		}
+		*p = PredExpr(a)
+		return nil
+	}
+	if probe.Field != nil {
+		var lg legacyPred
+		if err := json.Unmarshal(b, &lg); err != nil {
+			return err
+		}
+		*p = *lg.toTree()
+		return nil
+	}
+	return fmt.Errorf("dsl: predicate JSON has neither \"kind\" nor \"field\": %s", string(b))
+}
+
+// toTree expands a flat legacy predicate into the in-memory tree.
+func (lg legacyPred) toTree() *PredExpr {
+	col := &PredOperand{Kind: OperandColumn, Name: lg.Field}
+	if lg.Op == "" {
+		return &PredExpr{Kind: PredKindNull, Arg: col, Negated: !lg.IsNull}
+	}
+	return &PredExpr{Kind: PredKindCompare, Op: lg.Op, Left: col,
+		Right: &PredOperand{Kind: OperandLiteral, Literal: lg.Literal}}
+}
+
+// Columns returns every column referenced anywhere in the predicate tree, in
+// pre-order. Used by IR validation to check each against the entity's fields.
+func (p *PredExpr) Columns() []string {
+	var out []string
+	var opCols func(o *PredOperand)
+	var walk func(p *PredExpr)
+	opCols = func(o *PredOperand) {
+		if o == nil {
+			return
+		}
+		switch o.Kind {
+		case OperandColumn:
+			out = append(out, o.Name)
+		case OperandFunc:
+			for _, a := range o.Args {
+				opCols(a)
+			}
+		case OperandCast:
+			opCols(o.Inner)
+		case OperandCase:
+			for _, w := range o.Whens {
+				walk(w.Cond)
+				opCols(w.Then)
+			}
+			opCols(o.Else)
+		}
+	}
+	walk = func(p *PredExpr) {
+		if p == nil {
+			return
+		}
+		switch p.Kind {
+		case PredKindBool:
+			for _, o := range p.Operands {
+				walk(o)
+			}
+		case PredKindNot:
+			walk(p.Inner)
+		case PredKindCompare:
+			opCols(p.Left)
+			opCols(p.Right)
+		case PredKindNull, PredKindTruthy:
+			opCols(p.Arg)
+		case PredKindIn:
+			opCols(p.Arg)
+			for _, o := range p.List {
+				opCols(o)
+			}
+		}
+	}
+	walk(p)
+	return out
 }
 
 // Cache holds the resolved cache stanza.
@@ -988,19 +1213,81 @@ func lowerIndex(d *IndexDecl) Index {
 		Unique: d.Unique,
 	}
 	if d.Where != nil {
-		idx.Where = &PartialPred{
-			Field:  d.Where.Field,
-			IsNull: d.Where.IsNull,
-			Op:     d.Where.Op,
-		}
-		if d.Where.Op != "" {
-			lit, err := lowerDefault(d.Where.Literal)
-			if err == nil {
-				idx.Where.Literal = lit
-			}
-		}
+		idx.Where = lowerPred(d.Where)
 	}
 	return idx
+}
+
+// lowerPred converts an AST predicate tree into the resolved IR tree.
+func lowerPred(p Pred) *PredExpr {
+	switch n := p.(type) {
+	case *PredBool:
+		ops := make([]*PredExpr, len(n.Operands))
+		for i, o := range n.Operands {
+			ops[i] = lowerPred(o)
+		}
+		return &PredExpr{Kind: PredKindBool, Op: n.Op, Operands: ops}
+	case *PredNot:
+		return &PredExpr{Kind: PredKindNot, Inner: lowerPred(n.Inner)}
+	case *PredCompare:
+		return &PredExpr{Kind: PredKindCompare, Op: n.Op,
+			Left: lowerOperand(n.Left), Right: lowerOperand(n.Right)}
+	case *PredNull:
+		return &PredExpr{Kind: PredKindNull, Arg: lowerOperand(n.Operand), Negated: n.Negated}
+	case *PredIn:
+		list := make([]*PredOperand, len(n.List))
+		for i, o := range n.List {
+			list[i] = lowerOperand(o)
+		}
+		return &PredExpr{Kind: PredKindIn, Arg: lowerOperand(n.Operand), List: list, Negated: n.Negated}
+	case *PredTruthy:
+		return &PredExpr{Kind: PredKindTruthy, Arg: lowerOperand(n.Operand)}
+	}
+	return nil
+}
+
+// lowerOperand converts an AST operand into the resolved IR operand.
+func lowerOperand(o Operand) *PredOperand {
+	switch n := o.(type) {
+	case *OpColumn:
+		return &PredOperand{Kind: OperandColumn, Name: n.Name}
+	case *OpLiteral:
+		return &PredOperand{Kind: OperandLiteral, Literal: lowerOpLiteral(n)}
+	case *OpFunc:
+		args := make([]*PredOperand, len(n.Args))
+		for i, a := range n.Args {
+			args[i] = lowerOperand(a)
+		}
+		return &PredOperand{Kind: OperandFunc, FuncName: n.Name, Args: args}
+	case *OpCast:
+		return &PredOperand{Kind: OperandCast, Inner: lowerOperand(n.Inner), CastType: n.Type}
+	case *OpCase:
+		whens := make([]PredCaseWhen, len(n.Whens))
+		for i, w := range n.Whens {
+			whens[i] = PredCaseWhen{Cond: lowerPred(w.Cond), Then: lowerOperand(w.Then)}
+		}
+		oc := &PredOperand{Kind: OperandCase, Whens: whens}
+		if n.Else != nil {
+			oc.Else = lowerOperand(n.Else)
+		}
+		return oc
+	}
+	return nil
+}
+
+// lowerOpLiteral resolves a predicate literal operand into a Default.
+func lowerOpLiteral(l *OpLiteral) *Default {
+	switch l.Kind {
+	case LitString:
+		return &Default{Kind: DefaultIRString, Str: l.Str}
+	case LitInt:
+		return &Default{Kind: DefaultIRInt, Int: l.Int}
+	case LitFloat:
+		return &Default{Kind: DefaultIRFloat, Float: l.Float}
+	case LitBool:
+		return &Default{Kind: DefaultIRBool, Bool: l.Bool}
+	}
+	return nil
 }
 
 func lowerCache(cb *CacheBlock, _ *Entity) (*Cache, []error) {
@@ -1300,8 +1587,12 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 					errs = append(errs, fmt.Errorf("%s btree index: field %q not found", e.ID(), ifld.Name))
 				}
 			}
-			if idx.Where != nil && e.FindField(idx.Where.Field) == nil {
-				errs = append(errs, fmt.Errorf("%s partial index: predicate field %q not found", e.ID(), idx.Where.Field))
+			if idx.Where != nil {
+				for _, col := range idx.Where.Columns() {
+					if e.FindField(col) == nil {
+						errs = append(errs, fmt.Errorf("%s partial index: predicate field %q not found", e.ID(), col))
+					}
+				}
 			}
 		}
 	}

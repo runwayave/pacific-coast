@@ -34,21 +34,21 @@ func TestClassifyUniqueIndexDrift_Partial(t *testing.T) {
 		entityID:   "vendor.ProductVariant",
 		fields:     map[string]bool{"sku": true, "deleted_at": true},
 		uniqueSets: map[string]bool{},
-		partialUniques: map[string][]*dsl.PartialPred{
-			uniqueKey([]string{"sku"}): {{Field: "deleted_at", IsNull: true}},
+		partialUniques: map[string][]*dsl.PredExpr{
+			uniqueKey([]string{"sku"}): {nullPred("deleted_at", false)},
 		},
 	}
 	declared := map[physRef]declaredUnique{pv: du}
 
 	matching := liveIdx("vendor", "product_variants", "sku_live_uq", true, "sku")
 	matching.predicate = "(deleted_at IS NULL)"
-	if d := classifyUniqueIndexDrift(declared, map[physRef][]liveUniqueIndex{pv: {matching}}); len(d) != 0 {
+	if d := classifyUniqueIndexDrift(declared, map[physRef][]liveUniqueIndex{pv: {matching}}, fakeNormalize); len(d) != 0 {
 		t.Errorf("matching declared unique partial should NOT be drift, got %+v", d)
 	}
 
 	mismatch := liveIdx("vendor", "product_variants", "sku_live_uq2", true, "sku")
 	mismatch.predicate = "(deleted_at IS NOT NULL)"
-	if d := classifyUniqueIndexDrift(declared, map[physRef][]liveUniqueIndex{pv: {mismatch}}); len(d) != 1 {
+	if d := classifyUniqueIndexDrift(declared, map[physRef][]liveUniqueIndex{pv: {mismatch}}, fakeNormalize); len(d) != 1 {
 		t.Errorf("predicate-mismatched partial unique SHOULD be drift, got %+v", d)
 	}
 }
@@ -130,7 +130,7 @@ func TestClassifyUniqueIndexDrift(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyUniqueIndexDrift(tc.declared, tc.live)
+			got := classifyUniqueIndexDrift(tc.declared, tc.live, fakeNormalize)
 			if len(got) != tc.wantN {
 				t.Fatalf("got %d drift(s), want %d: %+v", len(got), tc.wantN, got)
 			}

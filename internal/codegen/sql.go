@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/predsql"
 	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
@@ -814,7 +815,7 @@ func emitIndexCreate(b *sqlBuilder, e *dsl.Entity, idx dsl.Index) {
 		}
 		where := ""
 		if idx.Where != nil {
-			where = " WHERE " + renderPartialPred(idx.Where)
+			where = " WHERE " + predsql.Render(idx.Where)
 		}
 		b.linef("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)%s;",
 			unique, name, qualifiedTable(e), indexFieldList(idx.Fields), where)
@@ -829,27 +830,6 @@ func emitIndexCreate(b *sqlBuilder, e *dsl.Entity, idx dsl.Index) {
 
 func emitIndexDrop(b *sqlBuilder, e *dsl.Entity, idx dsl.Index) {
 	b.linef("DROP INDEX IF EXISTS %s;", qualifiedIndexName(e, idx))
-}
-
-// renderPartialPred turns a PartialPred into its SQL fragment. Two forms:
-//   - field IS [NOT] NULL              (Op == "")
-//   - field <op> <literal>             (Op != "")
-//
-// String literals are single-quoted with embedded quotes doubled. The
-// column identifier is double-quoted for the same reason every other
-// emitted identifier is — defense-in-depth against PG reserved words.
-func renderPartialPred(p *dsl.PartialPred) string {
-	if p.Op == "" {
-		if p.IsNull {
-			return quoteIdent(p.Field) + " IS NULL"
-		}
-		return quoteIdent(p.Field) + " IS NOT NULL"
-	}
-	rhs := "NULL"
-	if p.Literal != nil {
-		rhs = defaultExpr(*p.Literal)
-	}
-	return quoteIdent(p.Field) + " " + p.Op + " " + rhs
 }
 
 // qualifiedTable returns the schema-qualified, double-quoted table name.

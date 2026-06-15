@@ -2,10 +2,12 @@ package codegen
 
 import (
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/predsql"
 )
 
 // EmitGoCacheKeys emits one `<entity>_cache_keys.go` per entity with the
@@ -251,45 +253,68 @@ func %s(%s) string {
 }
 
 // partialPredSuffix renders a partial-index WHERE predicate as a Go identifier
-// fragment. The fragment must be deterministic and unique across the predicate
-// forms the DSL accepts (IS NULL / IS NOT NULL / comparison-against-literal),
+// fragment. The fragment must be deterministic and unique across predicates,
 // otherwise two partials on the same field set collide at function-name level
 // even though the SQL emitter handles them as distinct indexes.
-func partialPredSuffix(p *dsl.PartialPred) string {
+//
+// The two pre-tree shapes (IS [NOT] NULL, comparison-against-literal) reproduce
+// the exact identifier the generator emitted before predicates became trees, so
+// regenerating an unchanged schema produces byte-identical code. Compound
+// predicates fall back to a hash of the canonical key — unreadable but
+// deterministic, valid, and collision-free (the diff key is the real identity).
+func partialPredSuffix(p *dsl.PredExpr) string {
 	if p == nil {
 		return ""
 	}
-	field := snakeToCamel(p.Field)
-	switch {
-	case p.Op == "" && p.IsNull:
-		return "Where" + field + "IsNull"
-	case p.Op == "":
-		return "Where" + field + "IsNotNull"
-	}
-	op := map[string]string{
-		"=": "Eq", "!=": "Ne",
-		"<": "Lt", "<=": "Le",
-		">": "Gt", ">=": "Ge",
-	}[p.Op]
-	if op == "" {
-		op = "Op"
-	}
-	lit := ""
-	if p.Literal != nil {
-		switch p.Literal.Kind {
-		case dsl.DefaultIRString:
-			lit = snakeToCamel(p.Literal.Str)
-		case dsl.DefaultIRInt:
-			lit = fmt.Sprintf("%d", p.Literal.Int)
-		case dsl.DefaultIRBool:
-			if p.Literal.Bool {
-				lit = "True"
-			} else {
-				lit = "False"
+	if field, op, isNull, lit, ok := p.LegacyForm(); ok {
+		f := snakeToCamel(field)
+		if op == "" {
+			if isNull {
+				return "Where" + f + "IsNull"
 			}
+			return "Where" + f + "IsNotNull"
 		}
+		return "Where" + f + legacyOpCamel(op) + legacyLitCamel(lit)
 	}
-	return "Where" + field + op + lit
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(predsql.CanonicalKey(p)))
+	return fmt.Sprintf("WherePred%016X", h.Sum64())
+}
+
+func legacyOpCamel(op string) string {
+	switch op {
+	case "=":
+		return "Eq"
+	case "!=":
+		return "Ne"
+	case "<":
+		return "Lt"
+	case "<=":
+		return "Le"
+	case ">":
+		return "Gt"
+	case ">=":
+		return "Ge"
+	}
+	return "Op"
+}
+
+func legacyLitCamel(d *dsl.Default) string {
+	if d == nil {
+		return ""
+	}
+	switch d.Kind {
+	case dsl.DefaultIRString:
+		return snakeToCamel(d.Str)
+	case dsl.DefaultIRInt:
+		return fmt.Sprintf("%d", d.Int)
+	case dsl.DefaultIRBool:
+		if d.Bool {
+			return "True"
+		}
+		return "False"
+	}
+	return ""
 }
 
 // tagExpansion builds the function arg list and the runtime expression that

@@ -9,6 +9,7 @@ package schema
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
@@ -152,6 +153,8 @@ func DefaultExpr(d dsl.Default) string {
 		return "'" + strings.ReplaceAll(d.Str, "'", "''") + "'"
 	case dsl.DefaultIRInt:
 		return fmt.Sprintf("%d", d.Int)
+	case dsl.DefaultIRFloat:
+		return strconv.FormatFloat(d.Float, 'g', -1, 64)
 	case dsl.DefaultIRBool:
 		if d.Bool {
 			return "TRUE"
