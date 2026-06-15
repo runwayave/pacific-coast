@@ -46,34 +46,28 @@ IndexField     = ( Ident | "expr" StringLiteral ) [ "asc" | "desc" ]
 
 VectorOps      = "cosine" | "l2" | "ip"
 
-PartialPredicate = OrExpr
-OrExpr   = AndExpr { "or"  AndExpr }
-AndExpr  = NotExpr { "and" NotExpr }
-NotExpr  = "not" NotExpr | Primary
-Primary  =
-    "(" PartialPredicate ")"
-  | Operand PartialOp Operand
-  | Operand "is" [ "not" ] "null"
-  | Operand [ "not" ] "in" "(" Operand { "," Operand } ")"
-  | Operand                              // bare boolean column
-
-Operand  = Base { "::" Type }
-Base     = StringLiteral | NumericLiteral | BooleanLiteral
-         | Ident                                       // column
-         | Ident "(" [ Operand { "," Operand } ] ")"   // immutable function call
-         | Case
-Case     = "case" { "when" PartialPredicate "then" Operand } [ "else" Operand ] "end"
-Type     = Ident [ "(" Integer { "," Integer } ")" ]
-
-PartialOp = "=" | "!=" | "<" | "<=" | ">" | ">="
+PartialPredicate = <any SQL boolean expression valid in a Postgres index predicate>
 ```
 
-`and` binds tighter than `or`; parenthesise to override. `and`/`or` (and the CASE
-keywords `case`/`when`/`then`/`else`/`end`) are not reserved words — a field may
-still be named `and`, `case`, etc. everywhere except where it would start one of
-those constructs. `NumericLiteral` covers both integers and floats (`3`, `3.14`).
-Operands may be columns, literals, immutable function calls (`lower(email)`),
-casts (`amount::numeric`), and CASE expressions.
+The `where` predicate is **a SQL expression**, parsed by Postgres's own parser
+(`pg_query`) rather than a fixed DSL grammar. It accepts the full surface of a
+legal index predicate: boolean operators (`and`/`or`/`not`), comparisons,
+arithmetic, `||`, `like`/`~`, JSON operators, `is [not] null`, `[not] in (...)`,
+`between`, array literals with `any`/`all`, `is distinct from`, immutable function
+calls (`lower(email)`), casts (`amount::numeric`), and `case … end`. The predicate
+runs to the first newline, entity-closing `}`, or `//` comment outside any
+`"..."` string.
+
+String literals use the DSL convention — double quotes (`where status = "active"`)
+— consistent with the rest of the `.atl`; atlantis converts them to SQL on the way
+in. Because `"..."` is always a string (never a quoted identifier), a column whose
+name is a SQL reserved word can't be referenced: `where "order" > 0` reads as a
+string, and a bare `where order > 0` is a Postgres syntax error.
+
+It must be a *legal Postgres index predicate*. Subqueries, window functions, and
+aggregate syntax (`count(*)`, `… filter (…)`) are rejected at parse with a clear
+error. A plain aggregate (`sum(col)`) or a volatile function (`now()`, `random()`)
+is caught by Postgres when the index is built at apply time.
 
 Entity names use `PascalIdent`; namespaces use `SnakeIdent`. Underscores are syntactically valid in namespaces but not conventional.
 
@@ -150,7 +144,7 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 - `composite_pk by f1, f2` — composite primary key. Member fields must each be `not null`. Mutually exclusive with per-field `primary`.
 - `unique by f1, f2` — multi-column unique constraint. May appear multiple times. For a single column, use the per-field `unique` modifier instead.
 - `index by f1, f2` — non-unique B-tree index. May appear multiple times. Each field may instead be an expression (`expr "lower(email)"`) and may carry a per-field `asc` or `desc` (e.g. `index by created_at desc`).
-- `index partial by f1, f2 where <predicate>` — partial index. The predicate is a boolean expression over the entity's columns and constants: `and` / `or` / `not` / parentheses combining comparisons (`=`, `!=`, `<`, `<=`, `>`, `>=`; inequality is written `!=`), `field is [not] null`, `field [not] in (...)`, and bare boolean columns (`where is_default`). Operands may be columns, literals, immutable function calls (`lower(email)`), casts (`amount::numeric`), and `case … end` expressions. It must be a *legal Postgres index predicate* — no subqueries or aggregates; a volatile function (`now()`, `random()`) is rejected by Postgres at apply time.
+- `index partial by f1, f2 where <predicate>` — partial index. `<predicate>` is a [`PartialPredicate`](#entities) (any SQL boolean expression valid in a Postgres index predicate). e.g. `index partial by sku where deleted_at is null`, `index partial by id where status = "active" and lower(sku) like "a%"`.
 - `unique index partial by f1, f2 where <predicate>` — partial **unique** index (`CREATE UNIQUE INDEX … WHERE …`). Use it for uniqueness scoped by a predicate — e.g. `unique index partial by sku where deleted_at is null` makes `sku` unique among non-soft-deleted rows, or `unique index partial by user_id where is_default` for one default per user. A Postgres UNIQUE *constraint* can't be partial, so `unique` / `unique by` can't express this. Same predicate grammar as `index partial`.
 - `index hnsw on <field> ops <cosine|l2|ip>` — pgvector HNSW index over a `vector(N)` field. `ops` picks the operator class: `cosine`, `l2` (Euclidean), or `ip` (inner product).
 - `index gin on <field>` — GIN index, for `jsonb` and array fields.
