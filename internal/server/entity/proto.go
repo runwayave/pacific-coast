@@ -148,43 +148,49 @@ func dslFieldToProtoField(f *dsl.Field) *descriptorpb.FieldDescriptorProto {
 		Number: &num,
 	}
 
-	// Determine if this is repeated (array or vector).
-	if f.Type.Array {
-		label := descriptorpb.FieldDescriptorProto_LABEL_REPEATED
-		fd.Label = &label
-		if f.Type.Elem != nil {
-			setProtoType(fd, *f.Type.Elem)
+	applyProtoFieldType(fd, f.Type)
+	// Nullable scalars are proto3-optional for presence tracking; repeated
+	// fields (array/vector) never take proto3-optional. protodesc.NewFile
+	// materializes the synthetic oneof from Proto3Optional.
+	if !f.Type.Array && f.Type.Name != "vector" && schema.IsEffectivelyNullable(f) {
+		fd.Proto3Optional = boolPtr(true)
+	}
+	return fd
+}
+
+// applyProtoFieldType sets a field descriptor's Type and Label from a DSL
+// field type: vector(N) and []T are LABEL_REPEATED (repeated float /
+// repeated <elem>), every other type is a LABEL_OPTIONAL scalar. This is
+// the single place that decides a field's proto cardinality, shared by the
+// entity and custom-query descriptor builders so the two can't diverge.
+// They did once: the custom-query builder hard-coded LABEL_OPTIONAL and
+// left vector inputs as a scalar float, so the client's packed 768-float
+// payload hit a wire-type mismatch (skipped → 0) and the runtime
+// dispatcher panicked ("cannot convert float32 to list") once it tried to
+// read the field as a list.
+func applyProtoFieldType(fd *descriptorpb.FieldDescriptorProto, t dsl.FieldType) {
+	if t.Array {
+		rep := descriptorpb.FieldDescriptorProto_LABEL_REPEATED
+		fd.Label = &rep
+		if t.Elem != nil {
+			setProtoType(fd, *t.Elem)
 		} else {
 			// bare array with no elem info — default to string
 			typ := descriptorpb.FieldDescriptorProto_TYPE_STRING
 			fd.Type = &typ
 		}
-		return fd
+		return
 	}
-
-	if f.Type.Name == "vector" {
-		label := descriptorpb.FieldDescriptorProto_LABEL_REPEATED
-		fd.Label = &label
+	if t.Name == "vector" {
+		rep := descriptorpb.FieldDescriptorProto_LABEL_REPEATED
+		fd.Label = &rep
 		typ := descriptorpb.FieldDescriptorProto_TYPE_FLOAT
 		fd.Type = &typ
-		return fd
+		return
 	}
-
-	// Scalar. Determine if nullable (optional).
-	nullable := schema.IsEffectivelyNullable(f)
-	if nullable {
-		label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
-		fd.Label = &label
-		fd.Proto3Optional = boolPtr(true)
-		// proto3 optional needs a synthetic oneof.
-		// protodesc.NewFile handles this from Proto3Optional.
-	} else {
-		label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
-		fd.Label = &label
-	}
-
-	setProtoType(fd, f.Type)
-	return fd
+	opt := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+	fd.Label = &opt
+	setProtoType(fd, t)
 }
 
 func setProtoType(fd *descriptorpb.FieldDescriptorProto, t dsl.FieldType) {

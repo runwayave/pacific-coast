@@ -97,9 +97,7 @@ func buildCustomProcedureDescs(cp *dsl.CustomProcedure, ns string) (protoreflect
 	for i, input := range cp.Inputs {
 		num := int32(i + 1)
 		fd := &descriptorpb.FieldDescriptorProto{Name: strPtr(input.Name), Number: &num}
-		label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
-		fd.Label = &label
-		setProtoType(fd, input.Type)
+		applyProtoFieldType(fd, input.Type)
 		reqMsg.Field = append(reqMsg.Field, fd)
 		if input.Type.Name == "timestamptz" || input.Type.Name == "date" {
 			needsTimestamp = true
@@ -256,9 +254,7 @@ func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDes
 			Name:   strPtr(input.Name),
 			Number: &num,
 		}
-		label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
-		fd.Label = &label
-		setProtoType(fd, input.Type)
+		applyProtoFieldType(fd, input.Type)
 		reqMsg.Field = append(reqMsg.Field, fd)
 	}
 	file.MessageType = append(file.MessageType, reqMsg)
@@ -279,9 +275,7 @@ func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDes
 				Name:   strPtr(col.Name),
 				Number: &num,
 			}
-			label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
-			fd.Label = &label
-			setProtoType(fd, col.Type)
+			applyProtoFieldType(fd, col.Type)
 			rowMsg.Field = append(rowMsg.Field, fd)
 		}
 		// Nest the Row inside the response.

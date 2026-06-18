@@ -163,3 +163,63 @@ func TestCustomVectorOutput_ScanRoundTrip(t *testing.T) {
 		t.Errorf("NULL vector should leave the field empty, got %d floats", got)
 	}
 }
+
+// TestBuildCustomQueryDescs_VectorIsRepeated pins the descriptor-level
+// root cause behind the HNSWSearchVariants panic: a vector(N) input/output
+// must be a `repeated float` proto field. The custom-query descriptor
+// builder previously hard-coded LABEL_OPTIONAL, making it a scalar float —
+// so the client's packed 768-float payload hit a wire-type mismatch
+// (the field decoded to 0, the original "invalid input syntax ... 0") and
+// the dispatcher panicked reading it as a list once the binder was fixed.
+// (The earlier binder test used the entity descriptor, which was already
+// correct, so it never caught this.)
+func TestBuildCustomQueryDescs_VectorIsRepeated(t *testing.T) {
+	cq := &dsl.CustomQuery{
+		Name: "VecSearch",
+		Inputs: []dsl.QueryParam{
+			{Name: "search_vec", Type: dsl.FieldType{Name: "vector", VecDim: 768}},
+			{Name: "limit", Type: dsl.FieldType{Name: "int"}},
+		},
+		Output: dsl.CustomOutput{
+			Columns: []dsl.QueryParam{
+				{Name: "id", Type: dsl.FieldType{Name: "varchar"}},
+				{Name: "vec_out", Type: dsl.FieldType{Name: "vector", VecDim: 768}},
+			},
+		},
+	}
+	file, err := buildCustomQueryDescs(cq, "vendor")
+	if err != nil {
+		t.Fatalf("buildCustomQueryDescs: %v", err)
+	}
+
+	req := file.Messages().ByName("VecSearchRequest")
+	if req == nil {
+		t.Fatal("request message not built")
+	}
+	sv := req.Fields().ByName("search_vec")
+	if sv == nil {
+		t.Fatal("search_vec input field missing")
+	}
+	if sv.Cardinality() != protoreflect.Repeated {
+		t.Errorf("vector input must be repeated, got %v", sv.Cardinality())
+	}
+	if sv.Kind() != protoreflect.FloatKind {
+		t.Errorf("vector input must be float, got %v", sv.Kind())
+	}
+	if lim := req.Fields().ByName("limit"); lim.Cardinality() == protoreflect.Repeated {
+		t.Error("scalar input must not be repeated")
+	}
+
+	// Vector output column (nested Row submessage) must also be repeated.
+	resp := file.Messages().ByName("VecSearchResponse")
+	if resp == nil {
+		t.Fatal("response message not built")
+	}
+	row := resp.Messages().ByName("VecSearchResponse_Row")
+	if row == nil {
+		t.Fatal("response Row submessage not built")
+	}
+	if vo := row.Fields().ByName("vec_out"); vo == nil || vo.Cardinality() != protoreflect.Repeated {
+		t.Errorf("vector output column must be repeated, got %v", vo)
+	}
+}
